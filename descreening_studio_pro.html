@@ -1,0 +1,1630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Descreening Studio Pro - FFT & Neural Restorer v3.7</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- UTIF.js for native TIFF scan decoding -->
+    <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.min.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: #0b0f19;
+            color: #f1f5f9;
+        }
+        .checkerboard {
+            background-color: #0f172a;
+            background-image: linear-gradient(45deg, #1e293b 25%, transparent 25%),
+                              linear-gradient(-45deg, #1e293b 25%, transparent 25%),
+                              linear-gradient(45deg, transparent 75%, #1e293b 75%),
+                              linear-gradient(-45deg, transparent 75%, #1e293b 75%);
+            background-size: 16px 16px;
+            background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+        }
+        canvas {
+            image-rendering: pixelated;
+        }
+        /* Custom scrollbars */
+        ::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #0f172a;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #334155;
+            border-radius: 3px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #475569;
+        }
+        input[type=range] {
+            accent-color: #38bdf8;
+        }
+        .roi-box {
+            position: absolute;
+            border: 2px solid #38bdf8;
+            background: rgba(56, 189, 248, 0.25);
+            cursor: move;
+            box-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+        }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col select-none relative" id="main-drop-target">
+
+    <!-- Loading Overlay Spinner -->
+    <div id="loading-overlay" class="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex flex-col items-center justify-center hidden">
+        <div class="p-5 bg-slate-900 border border-slate-800 rounded-2xl flex flex-col items-center gap-3 shadow-2xl">
+            <i class="fa-solid fa-spinner fa-spin text-3xl text-cyan-400"></i>
+            <span id="loading-text" class="text-xs font-semibold text-slate-200" data-i18n="msgProcessing">Processing...</span>
+        </div>
+    </div>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="fixed bottom-6 right-6 bg-slate-900 border border-cyan-800/80 text-cyan-200 px-4 py-3 rounded-xl shadow-2xl transform translate-y-20 opacity-0 transition-all duration-300 z-50 text-xs flex items-center space-x-2">
+        <i class="fa-solid fa-circle-info text-cyan-400 text-sm"></i>
+        <span id="toast-msg">Notification</span>
+    </div>
+
+    <!-- Header -->
+    <header class="border-b border-slate-800 bg-slate-950/90 backdrop-blur px-6 py-3 flex flex-wrap items-center justify-between gap-4 sticky top-0 z-40">
+        <div class="flex items-center space-x-3">
+            <div class="p-2.5 bg-gradient-to-tr from-cyan-600 to-blue-600 rounded-xl text-white font-extrabold shadow-lg shadow-cyan-900/30">
+                <i class="fa-solid fa-wave-square text-lg"></i>
+            </div>
+            <div>
+                <h1 class="text-lg font-bold tracking-tight text-white flex items-center gap-2">
+                    <span data-i18n="appTitle">Descreening Studio Pro</span>
+                    <span class="text-xs bg-cyan-950 text-cyan-400 border border-cyan-800 px-2 py-0.5 rounded-full font-mono">v3.7</span>
+                </h1>
+                <p class="text-xs text-slate-400" data-i18n="appSubtitle">Professional Halftone Moire Reduction: 2D FFT, Guided Filter & Symmetry Notch-detector</p>
+            </div>
+        </div>
+
+        <!-- Multilingual Language Selector -->
+        <div class="flex items-center gap-2 bg-slate-900 px-3 py-1.5 rounded-xl border border-slate-800 text-xs">
+            <i class="fa-solid fa-globe text-cyan-400"></i>
+            <span class="text-slate-400 font-medium">Lang:</span>
+            <select id="lang-select" onchange="switchLanguage(this.value)" class="bg-slate-950 text-cyan-300 font-semibold border border-slate-700 rounded-lg px-2 py-1 text-xs focus:outline-none focus:border-cyan-500 cursor-pointer">
+                <option value="en">English</option>
+                <option value="ru">Русский</option>
+            </select>
+        </div>
+
+        <div class="flex items-center space-x-3">
+            <label class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold px-4 py-2 rounded-lg cursor-pointer transition shadow-md shadow-cyan-900/30 flex items-center">
+                <i class="fa-solid fa-upload mr-2"></i><span data-i18n="openScan">Open Scan (TIFF / PNG / JPG)</span>
+                <input type="file" id="file-input" accept="image/*,.tif,.tiff" class="hidden">
+            </label>
+            <button onclick="downloadFullCleanResult()" id="btn-download" disabled class="bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold px-4 py-2 rounded-lg transition shadow-md shadow-emerald-900/30 flex items-center">
+                <i class="fa-solid fa-file-export mr-2"></i><span data-i18n="saveFull">Save Full File</span>
+            </button>
+        </div>
+    </header>
+
+    <!-- Main Workspace Area -->
+    <main class="flex-1 flex overflow-hidden relative">
+
+        <div class="flex-1 flex w-full h-full overflow-hidden">
+            
+            <!-- Sidebar Controls -->
+            <aside class="w-80 bg-slate-950 border-r border-slate-800 flex flex-col justify-between overflow-y-auto p-4 space-y-5 shrink-0">
+                
+                <!-- Image Info Banner -->
+                <div id="img-info-box" class="bg-slate-900/90 border border-slate-800 rounded-xl p-3 text-xs space-y-1">
+                    <div class="flex justify-between text-slate-400"><span data-i18n="infoRes">Resolution:</span> <b id="info-res" class="text-slate-200">-</b></div>
+                    <div class="flex justify-between text-slate-400"><span data-i18n="infoPeaks">Peaks found:</span> <b id="info-peaks" class="text-cyan-400">0</b></div>
+                </div>
+
+                <!-- ROI Navigator Section -->
+                <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-semibold text-slate-200"><i class="fa-solid fa-map-location-dot mr-1.5 text-cyan-400"></i><span data-i18n="navRoiHeader">ROI Navigator (1:1 Pixels)</span></span>
+                        <button onclick="resetNotchMask()" class="text-[10px] text-slate-400 hover:text-cyan-400 transition" title="Reset Retouch Mask">
+                            <i class="fa-solid fa-rotate-left mr-1"></i><span data-i18n="resetMaskBtn">Reset Mask</span>
+                        </button>
+                    </div>
+                    <div id="nav-container" class="relative w-full h-32 bg-slate-950 checkerboard rounded-lg overflow-hidden border border-slate-800 flex items-center justify-center cursor-crosshair">
+                        <canvas id="canvas-nav-thumb" class="max-w-full max-h-full object-contain"></canvas>
+                        <div id="nav-roi-box" class="roi-box rounded"></div>
+                    </div>
+                </div>
+
+                <!-- Presets & Parameter Management -->
+                <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-3">
+                    <div class="flex items-center justify-between">
+                        <span class="text-xs font-semibold text-slate-200"><i class="fa-solid fa-sliders mr-1.5 text-cyan-400"></i><span data-i18n="presetsHeader">Presets & Settings</span></span>
+                        <button onclick="resetToDefaultParams()" class="text-[10px] text-slate-400 hover:text-cyan-400 transition" title="Reset Sliders">
+                            <i class="fa-solid fa-rotate-left mr-1"></i><span data-i18n="resetParamsBtn">Reset</span>
+                        </button>
+                    </div>
+
+                    <div>
+                        <select id="preset-select" onchange="onPresetSelected(this.value)" class="w-full bg-slate-950 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500">
+                            <!-- Options populated dynamically in JS -->
+                        </select>
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button onclick="saveCurrentAsCustomPreset()" class="flex-1 bg-cyan-950 hover:bg-cyan-900 border border-cyan-800 text-cyan-300 text-[11px] py-1.5 rounded-lg transition flex items-center justify-center font-medium">
+                            <i class="fa-solid fa-bookmark mr-1"></i><span data-i18n="savePresetBtn">Save</span>
+                        </button>
+                        <button onclick="deleteSelectedCustomPreset()" id="btn-delete-preset" disabled class="bg-rose-950/60 hover:bg-rose-900/80 border border-rose-800/80 text-rose-300 disabled:opacity-30 disabled:cursor-not-allowed text-[11px] px-3 py-1.5 rounded-lg transition flex items-center justify-center">
+                            <i class="fa-solid fa-trash-can mr-1"></i><span data-i18n="delPresetBtn">Delete</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Section 1: FFT Filter Controls -->
+                <div class="space-y-4">
+                    <h2 class="text-xs uppercase font-bold tracking-wider text-cyan-400 border-b border-slate-800 pb-2 flex items-center justify-between">
+                        <span><i class="fa-solid fa-wand-magic-sparkles mr-2"></i><span data-i18n="spectrumFiltering">Spectrum Filtering</span></span>
+                    </h2>
+
+                    <!-- Processing Channel Mode -->
+                    <div>
+                        <label class="block text-xs font-medium text-slate-300 mb-1" data-i18n="fftChannel">2D FFT Color Channel</label>
+                        <select id="channel-select" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500">
+                            <option value="rgb" selected data-i18n="chanRgb">Per-channel (3D RGB FFT)</option>
+                            <option value="luminance" data-i18n="chanLuminance">Luminance (Luminance Y)</option>
+                            <option value="r" data-i18n="chanR">Red Channel (R)</option>
+                            <option value="g" data-i18n="chanG">Green Channel (G)</option>
+                            <option value="b" data-i18n="chanB">Blue Channel (B)</option>
+                        </select>
+                    </div>
+
+                    <!-- Auto Notch Detection Sensitivity -->
+                    <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-3">
+                        <div class="flex items-center justify-between">
+                            <span class="text-xs font-semibold text-slate-200"><i class="fa-solid fa-bullseye mr-1.5 text-cyan-400"></i><span data-i18n="peakDetection">Halftone Peak Detection</span></span>
+                            <button onclick="autoDetectFFTPeaks()" class="bg-cyan-600 hover:bg-cyan-500 text-white text-[11px] px-2.5 py-1 rounded-md font-medium transition shadow">
+                                <i class="fa-solid fa-rotate mr-1"></i><span data-i18n="btnFind">Detect</span>
+                            </button>
+                        </div>
+                        
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="sigmaThresh">Outlier Threshold (&sigma;)</span>
+                                <span id="sens-val" class="font-mono text-cyan-400">2.5x</span>
+                            </div>
+                            <input type="range" id="sens-slider" min="1.0" max="6.0" step="0.1" value="2.5" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="notchRadius">Notch Radius (D<sub>0</sub>)</span>
+                                <span id="radius-val" class="font-mono text-cyan-400">12 px</span>
+                            </div>
+                            <input type="range" id="radius-slider" min="3" max="35" step="1" value="12" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="butterworthOrder">Butterworth Order (n)</span>
+                                <span id="order-val" class="font-mono text-cyan-400">3</span>
+                            </div>
+                            <input type="range" id="order-slider" min="1" max="6" step="1" value="3" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                    </div>
+
+                    <!-- Spectrum Visual Contrast Controls -->
+                    <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-3">
+                        <span class="text-xs font-semibold text-slate-200 block"><i class="fa-solid fa-eye mr-1.5 text-cyan-400"></i><span data-i18n="spectrumVis">Spectrum Visualization</span></span>
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="spectrumGain">Gain Boost</span>
+                                <span id="gain-val" class="font-mono text-cyan-400">15</span>
+                            </div>
+                            <input type="range" id="gain-slider" min="1" max="40" step="1" value="15" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="spectrumGamma">Spectrum Gamma</span>
+                                <span id="gamma-val" class="font-mono text-cyan-400">0.70</span>
+                            </div>
+                            <input type="range" id="gamma-slider" min="0.2" max="1.8" step="0.05" value="0.70" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                    </div>
+
+                    <!-- Post-Processing: Fast Guided Denoise & Sharpening -->
+                    <div class="bg-slate-900/90 p-3 rounded-xl border border-slate-800 space-y-3">
+                        <span class="text-xs font-semibold text-slate-200 block"><i class="fa-solid fa-wand-magic mr-1.5 text-cyan-400"></i><span data-i18n="denoiseSharpen">Guided Denoise & Resharpen</span></span>
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="denoiseAmount">Guided Denoise</span>
+                                <span id="denoise-val" class="font-mono text-cyan-400">35%</span>
+                            </div>
+                            <input type="range" id="denoise-slider" min="0" max="100" step="5" value="35" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="edgeSmoothing">Border Anti-Alias (Edges)</span>
+                                <span id="edge-val" class="font-mono text-cyan-400">40%</span>
+                            </div>
+                            <input type="range" id="edge-slider" min="0" max="100" step="5" value="40" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                        <div>
+                            <div class="flex justify-between text-[11px] text-slate-400 mb-1">
+                                <span data-i18n="sharpnessAmount">Unsharp Mask</span>
+                                <span id="sharp-val" class="font-mono text-cyan-400">25%</span>
+                            </div>
+                            <input type="range" id="sharp-slider" min="0" max="100" step="5" value="25" class="w-full h-1 bg-slate-700 rounded">
+                        </div>
+                    </div>
+                </div>
+
+            </aside>
+
+            <!-- Main Processing Viewports -->
+            <div class="flex-1 flex flex-col bg-slate-900 overflow-hidden">
+                
+                <!-- Viewport Toolbar -->
+                <div class="bg-slate-950/80 border-b border-slate-800 px-4 py-2 flex items-center justify-between text-xs">
+                    <div class="flex items-center space-x-4 text-slate-400">
+                        <span class="text-slate-300 font-semibold"><i class="fa-solid fa-sliders text-cyan-400 mr-1.5"></i><span data-i18n="fftToolbarTitle">2D FFT Spectral Processing</span></span>
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <label class="flex items-center space-x-1.5 text-slate-300 cursor-pointer">
+                            <input type="checkbox" id="chk-diff-mode" class="accent-cyan-500 rounded">
+                            <span data-i18n="diffMode">Moire Diff Mode</span>
+                        </label>
+                        <button onclick="loadSampleImage()" class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-3 py-1.5 rounded-lg border border-slate-700 transition">
+                            <i class="fa-solid fa-vial mr-1"></i><span data-i18n="sampleBtn">Sample Scan</span>
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Workspaces Container -->
+                <div class="flex-1 flex overflow-hidden p-4 gap-4">
+                    
+                    <!-- Left Panel: Spectrum Visualizer & Interactive Brush -->
+                    <div class="w-1/2 flex flex-col bg-slate-950 rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
+                        <div class="bg-slate-900/90 px-3 py-2 border-b border-slate-800 flex items-center justify-between text-xs">
+                            <span class="font-semibold text-slate-200"><i class="fa-solid fa-compact-disc mr-1.5 text-cyan-400"></i><span data-i18n="spectrumBoxTitle">2D FFT Amplitude Spectrum</span></span>
+                            <span class="text-[10px] text-slate-400" data-i18n="spectrumBoxHint">Paint with mouse to manually erase harmonics</span>
+                        </div>
+                        <div class="flex-1 relative checkerboard flex items-center justify-center p-2">
+                            <canvas id="canvas-spectrum" class="max-w-full max-h-full object-contain cursor-crosshair rounded shadow-lg"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- Right Panel: Split View (Before / After) -->
+                    <div class="w-1/2 flex flex-col bg-slate-950 rounded-xl border border-slate-800 overflow-hidden shadow-2xl">
+                        <div class="bg-slate-900/90 px-3 py-2 border-b border-slate-800 flex items-center justify-between text-xs">
+                            <span class="font-semibold text-slate-200"><i class="fa-solid fa-microscope mr-1.5 text-emerald-400"></i><span data-i18n="resultBoxTitle">Cleaned Output (1:1 Split)</span></span>
+                            <span class="text-[10px] text-slate-400" data-i18n="resultBoxHint">Drag divider to compare</span>
+                        </div>
+                        
+                        <!-- Split Viewport -->
+                        <div id="viewport-container" class="relative flex-1 bg-slate-950 checkerboard overflow-hidden flex items-center justify-center select-none">
+                            
+                            <!-- BEFORE Layer -->
+                            <canvas id="canvas-roi-before" class="absolute max-w-full max-h-full object-contain pointer-events-none"></canvas>
+                            
+                            <!-- AFTER Layer (Clipped by Split Bar) -->
+                            <div id="after-wrapper" class="absolute inset-0 flex items-center justify-center overflow-hidden pointer-events-none">
+                                <canvas id="canvas-roi-after" class="max-w-full max-h-full object-contain"></canvas>
+                            </div>
+
+                            <!-- Interactive Split Slider Divider -->
+                            <div id="split-bar" class="absolute top-0 bottom-0 w-0.5 bg-cyan-400 cursor-ew-resize z-10 flex items-center justify-center shadow-[0_0_12px_rgba(56,189,248,0.9)]" style="left: 50%;">
+                                <div class="w-7 h-7 bg-cyan-500 rounded-full border-2 border-white shadow-lg flex items-center justify-center text-slate-950 text-[10px] font-bold">
+                                    <i class="fa-solid fa-left-right"></i>
+                                </div>
+                            </div>
+
+                            <div class="absolute bottom-3 left-3 bg-slate-950/80 border border-slate-800 px-2 py-1 rounded text-[10px] text-slate-300 pointer-events-none" data-i18n="beforeTag">BEFORE (Halftone)</div>
+                            <div class="absolute bottom-3 right-3 bg-cyan-950/80 border border-cyan-800 px-2 py-1 rounded text-[10px] text-cyan-300 pointer-events-none" data-i18n="afterTag">AFTER (2D IFFT)</div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+        // Global FFT & Application State
+        const FFT_SIZE = 256;
+        const HALF = FFT_SIZE / 2;
+        const DC_RADIUS = 12;
+
+        let currentLang = localStorage.getItem('descreen_lang') || 'en';
+
+        let originalImg = null;
+        let originalFileName = 'sample.png';
+        let imageLoaded = false;
+
+        // ROI State
+        let roiX = 0;
+        let roiY = 0;
+
+        // i18n Dictionaries
+        const I18N = {
+            en: {
+                appTitle: "Descreening Studio Pro",
+                appSubtitle: "Professional Halftone Moire Reduction: 2D FFT, Guided Filter & Symmetry Notch-detector",
+                openScan: "Open Scan (TIFF / PNG / JPG)",
+                saveFull: "Save Full File",
+                infoRes: "Resolution:",
+                infoPeaks: "Peaks found:",
+                presetsHeader: "Presets & Settings",
+                resetParamsBtn: "Reset",
+                savePresetBtn: "Save",
+                delPresetBtn: "Delete",
+                spectrumFiltering: "Spectrum Filtering",
+                fftChannel: "2D FFT Color Channel",
+                chanRgb: "Per-channel (3D RGB FFT)",
+                chanLuminance: "Luminance (Luminance Y)",
+                chanR: "Red Channel (R)",
+                chanG: "Green Channel (G)",
+                chanB: "Blue Channel (B)",
+                peakDetection: "Halftone Peak Detection",
+                btnFind: "Detect",
+                sigmaThresh: "Outlier Threshold (\u03c3)",
+                notchRadius: "Notch Radius (D\u2080)",
+                butterworthOrder: "Butterworth Order (n)",
+                spectrumVis: "Spectrum Visualization",
+                spectrumGain: "Gain Boost",
+                spectrumGamma: "Spectrum Gamma",
+                denoiseSharpen: "Guided Denoise & Edge Refinement",
+                denoiseAmount: "Guided Denoise",
+                edgeSmoothing: "Border Anti-Alias (Edges)",
+                sharpnessAmount: "Unsharp Mask",
+                resetMaskBtn: "Reset Mask",
+                navRoiHeader: "ROI Navigator (1:1 Pixels)",
+                fftToolbarTitle: "2D FFT Spectral Processing",
+                diffMode: "Moire Diff Mode",
+                sampleBtn: "Sample Scan",
+                spectrumBoxTitle: "2D FFT Amplitude Spectrum",
+                spectrumBoxHint: "Paint with mouse to manually erase harmonics",
+                resultBoxTitle: "Cleaned Output (1:1 Split)",
+                resultBoxHint: "Drag divider to compare",
+                beforeTag: "BEFORE (Halftone)",
+                afterTag: "AFTER (2D IFFT)",
+                toastLoaded: "Scan loaded successfully!",
+                toastMaskReset: "Notch mask reset",
+                toastPresetSaved: "Preset saved!",
+                toastPresetDeleted: "Preset deleted",
+                promptPresetName: "Enter custom preset name:",
+                msgProcessing: "Processing...",
+                msgGenSample: "Generating synthetic halftone scan...",
+                msgReadingFile: "Reading and decoding file...",
+                msgFullFFT: "Assembling and filtering full scan...",
+                msgFFTProgress: "FFT processing scan:"
+            },
+            ru: {
+                appTitle: "Descreening Studio Pro",
+                appSubtitle: "Профессиональное подавление растра: 2D БПФ, Guided Filter & Symmetry Notch-detector",
+                openScan: "Открыть Скан (TIFF / PNG / JPG)",
+                saveFull: "Сохранить Весь Файл",
+                infoRes: "Разрешение:",
+                infoPeaks: "Найденных пиков:",
+                presetsHeader: "Пресеты и Настройки",
+                resetParamsBtn: "Сбросить",
+                savePresetBtn: "Сохранить",
+                delPresetBtn: "Удалить",
+                spectrumFiltering: "Фильтрация Спектра",
+                fftChannel: "Цветовой канал 2D БПФ",
+                chanRgb: "Поканальный (3D RGB FFT)",
+                chanLuminance: "Яркость (Luminance Y)",
+                chanR: "Красный канал (R)",
+                chanG: "Зеленый канал (G)",
+                chanB: "Синий канал (B)",
+                peakDetection: "Детекция Пиков Растра",
+                btnFind: "Найти",
+                sigmaThresh: "Порог выброса (\u03c3)",
+                notchRadius: "Радиус Выреза (D\u2080)",
+                butterworthOrder: "Порядок Баттерворта (n)",
+                spectrumVis: "Визуализация Спектра",
+                spectrumGain: "Усиление (Gain)",
+                spectrumGamma: "Гамма спектра",
+                denoiseSharpen: "Шумоподавление и Границы",
+                denoiseAmount: "Guided Denoise (Шум)",
+                edgeSmoothing: "Сглаживание границ (Контуры)",
+                sharpnessAmount: "Контурная резкость",
+                resetMaskBtn: "Сброс маски",
+                navRoiHeader: "Навигатор ROI (1:1 Пиксели)",
+                fftToolbarTitle: "БПФ Спектральная обработка",
+                diffMode: "Режим разницы (Moire Diff)",
+                sampleBtn: "Тестовый скан",
+                spectrumBoxTitle: "2D Амплитудный Спектр БПФ",
+                spectrumBoxHint: "Рисуйте мышью для ручной ретуши гармоник",
+                resultBoxTitle: "Результат Очистки (1:1 Сравнение)",
+                resultBoxHint: "Перетаскивайте шторку",
+                beforeTag: "ДО (Растр)",
+                afterTag: "ПОСЛЕ (2D IFFT)",
+                toastLoaded: "Скан успешно загружен!",
+                toastMaskReset: "Маска ретуши сброшена",
+                toastPresetSaved: "Пресет сохранен!",
+                toastPresetDeleted: "Пресет удален",
+                promptPresetName: "Введите название пресета:",
+                msgProcessing: "Обработка...",
+                msgGenSample: "Генерация синтетического скана с растром...",
+                msgReadingFile: "Чтение и декодирование файла...",
+                msgFullFFT: "Сборка и БПФ-фильтрация всего скана...",
+                msgFFTProgress: "БПФ обработка скана:"
+            }
+        };
+
+        // Built-in Presets
+        const BUILTIN_PRESETS = {
+            default: {
+                name: { en: "Default (Medium Halftone)", ru: "Стандартный (Средний растр)" },
+                params: { channel: "rgb", sens: 2.5, radius: 12, order: 3, gain: 15, gamma: 0.70, denoise: 35, edge: 40, sharp: 25 }
+            },
+            magazine: {
+                name: { en: "Magazine Offset Print", ru: "Журнальная офсетная печать" },
+                params: { channel: "rgb", sens: 2.0, radius: 14, order: 4, gain: 18, gamma: 0.65, denoise: 40, edge: 50, sharp: 30 }
+            },
+            newspaper: {
+                name: { en: "Coarse Newspaper Print", ru: "Газетный крупный растр" },
+                params: { channel: "rgb", sens: 1.6, radius: 18, order: 5, gain: 20, gamma: 0.60, denoise: 50, edge: 60, sharp: 35 }
+            },
+            fine_engraving: {
+                name: { en: "Fine Micro-Dot / Engraving", ru: "Тонкая гравюра / Мелкий растр" },
+                params: { channel: "rgb", sens: 3.2, radius: 8, order: 2, gain: 12, gamma: 0.80, denoise: 15, edge: 20, sharp: 20 }
+            }
+        };
+
+        // Notch Mask Array (256x256)
+        let notchMask = new Float32Array(FFT_SIZE * FFT_SIZE);
+        notchMask.fill(1.0);
+
+        // CACHED Forward FFT Data
+        let cachedFft = {
+            reR: new Float64Array(FFT_SIZE * FFT_SIZE), imR: new Float64Array(FFT_SIZE * FFT_SIZE),
+            reG: new Float64Array(FFT_SIZE * FFT_SIZE), imG: new Float64Array(FFT_SIZE * FFT_SIZE),
+            reB: new Float64Array(FFT_SIZE * FFT_SIZE), imB: new Float64Array(FFT_SIZE * FFT_SIZE),
+            valid: false
+        };
+
+        let isRenderPending = false;
+
+        let cvsSpectrum, ctxSpectrum;
+        let cvsRoiBefore, ctxRoiBefore;
+        let cvsRoiAfter, ctxRoiAfter;
+        let cvsNavThumb, ctxNavThumb;
+
+        window.onload = function() {
+            cvsSpectrum = document.getElementById('canvas-spectrum');
+            ctxSpectrum = cvsSpectrum.getContext('2d');
+            cvsSpectrum.width = FFT_SIZE;
+            cvsSpectrum.height = FFT_SIZE;
+
+            cvsRoiBefore = document.getElementById('canvas-roi-before');
+            ctxRoiBefore = cvsRoiBefore.getContext('2d');
+            cvsRoiBefore.width = FFT_SIZE;
+            cvsRoiBefore.height = FFT_SIZE;
+
+            cvsRoiAfter = document.getElementById('canvas-roi-after');
+            ctxRoiAfter = cvsRoiAfter.getContext('2d');
+            cvsRoiAfter.width = FFT_SIZE;
+            cvsRoiAfter.height = FFT_SIZE;
+
+            cvsNavThumb = document.getElementById('canvas-nav-thumb');
+            ctxNavThumb = cvsNavThumb.getContext('2d');
+
+            setupEventListeners();
+            setupSplitSlider();
+            setupSpectrumInteractivity();
+            setupNavigatorInteractivity();
+            setupDragAndDrop();
+
+            // Language & Presets Initialization
+            document.getElementById('lang-select').value = currentLang;
+            setLanguage(currentLang);
+            populatePresetsDropdown();
+            loadSavedParameters();
+
+            loadSampleImage();
+        };
+
+        function switchLanguage(lang) {
+            currentLang = lang;
+            localStorage.setItem('descreen_lang', lang);
+            setLanguage(lang);
+            populatePresetsDropdown();
+        }
+
+        function setLanguage(lang) {
+            const dict = I18N[lang] || I18N.en;
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (dict[key]) {
+                    el.textContent = dict[key];
+                }
+            });
+        }
+
+        function getTranslation(key) {
+            const dict = I18N[currentLang] || I18N.en;
+            return dict[key] || key;
+        }
+
+        function getCustomPresets() {
+            try {
+                return JSON.parse(localStorage.getItem('descreen_custom_presets') || '{}');
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function saveCustomPresets(presets) {
+            localStorage.setItem('descreen_custom_presets', JSON.stringify(presets));
+        }
+
+        function populatePresetsDropdown() {
+            const select = document.getElementById('preset-select');
+            select.innerHTML = '';
+
+            const optGroupBuiltin = document.createElement('optgroup');
+            optGroupBuiltin.label = currentLang === 'ru' ? 'Встроенные пресеты' : 'Built-in Presets';
+
+            for (const [key, item] of Object.entries(BUILTIN_PRESETS)) {
+                const opt = document.createElement('option');
+                opt.value = `builtin:${key}`;
+                opt.textContent = item.name[currentLang] || item.name.en;
+                optGroupBuiltin.appendChild(opt);
+            }
+            select.appendChild(optGroupBuiltin);
+
+            const customPresets = getCustomPresets();
+            const customKeys = Object.keys(customPresets);
+            if (customKeys.length > 0) {
+                const optGroupCustom = document.createElement('optgroup');
+                optGroupCustom.label = currentLang === 'ru' ? 'Пользовательские пресеты' : 'User Presets';
+                customKeys.forEach(key => {
+                    const opt = document.createElement('option');
+                    opt.value = `custom:${key}`;
+                    opt.textContent = key;
+                    optGroupCustom.appendChild(opt);
+                });
+                select.appendChild(optGroupCustom);
+            }
+        }
+
+        function getCurrentParams() {
+            return {
+                channel: document.getElementById('channel-select').value,
+                sens: parseFloat(document.getElementById('sens-slider').value),
+                radius: parseInt(document.getElementById('radius-slider').value),
+                order: parseInt(document.getElementById('order-slider').value),
+                gain: parseInt(document.getElementById('gain-slider').value),
+                gamma: parseFloat(document.getElementById('gamma-slider').value),
+                denoise: parseInt(document.getElementById('denoise-slider').value),
+                edge: parseInt(document.getElementById('edge-slider').value),
+                sharp: parseInt(document.getElementById('sharp-slider').value)
+            };
+        }
+
+        function applyParams(p) {
+            if (!p) return;
+            if (p.channel) document.getElementById('channel-select').value = p.channel;
+            if (p.sens !== undefined) {
+                document.getElementById('sens-slider').value = p.sens;
+                document.getElementById('sens-val').textContent = p.sens + 'x';
+            }
+            if (p.radius !== undefined) {
+                document.getElementById('radius-slider').value = p.radius;
+                document.getElementById('radius-val').textContent = p.radius + ' px';
+            }
+            if (p.order !== undefined) {
+                document.getElementById('order-slider').value = p.order;
+                document.getElementById('order-val').textContent = p.order;
+            }
+            if (p.gain !== undefined) {
+                document.getElementById('gain-slider').value = p.gain;
+                document.getElementById('gain-val').textContent = p.gain;
+            }
+            if (p.gamma !== undefined) {
+                document.getElementById('gamma-slider').value = p.gamma;
+                document.getElementById('gamma-val').textContent = parseFloat(p.gamma).toFixed(2);
+            }
+            if (p.denoise !== undefined) {
+                document.getElementById('denoise-slider').value = p.denoise;
+                document.getElementById('denoise-val').textContent = p.denoise + '%';
+            }
+            if (p.edge !== undefined) {
+                document.getElementById('edge-slider').value = p.edge;
+                document.getElementById('edge-val').textContent = p.edge + '%';
+            }
+            if (p.sharp !== undefined) {
+                document.getElementById('sharp-slider').value = p.sharp;
+                document.getElementById('sharp-val').textContent = p.sharp + '%';
+            }
+
+            saveCurrentParametersToStorage();
+            cachedFft.valid = false;
+            requestPipelineExecution(true);
+        }
+
+        function onPresetSelected(val) {
+            const btnDel = document.getElementById('btn-delete-preset');
+            if (val.startsWith('builtin:')) {
+                btnDel.disabled = true;
+                const key = val.replace('builtin:', '');
+                if (BUILTIN_PRESETS[key]) {
+                    applyParams(BUILTIN_PRESETS[key].params);
+                }
+            } else if (val.startsWith('custom:')) {
+                btnDel.disabled = false;
+                const key = val.replace('custom:', '');
+                const customPresets = getCustomPresets();
+                if (customPresets[key]) {
+                    applyParams(customPresets[key]);
+                }
+            }
+        }
+
+        function saveCurrentAsCustomPreset() {
+            const name = prompt(getTranslation('promptPresetName'));
+            if (!name || !name.trim()) return;
+
+            const trimmed = name.trim();
+            const customPresets = getCustomPresets();
+            customPresets[trimmed] = getCurrentParams();
+            saveCustomPresets(customPresets);
+
+            populatePresetsDropdown();
+            document.getElementById('preset-select').value = `custom:${trimmed}`;
+            document.getElementById('btn-delete-preset').disabled = false;
+            showToast(getTranslation('toastPresetSaved'));
+        }
+
+        function deleteSelectedCustomPreset() {
+            const select = document.getElementById('preset-select');
+            const val = select.value;
+            if (!val.startsWith('custom:')) return;
+
+            const key = val.replace('custom:', '');
+            const customPresets = getCustomPresets();
+            delete customPresets[key];
+            saveCustomPresets(customPresets);
+
+            populatePresetsDropdown();
+            document.getElementById('preset-select').value = 'builtin:default';
+            onPresetSelected('builtin:default');
+            showToast(getTranslation('toastPresetDeleted'));
+        }
+
+        function saveCurrentParametersToStorage() {
+            localStorage.setItem('descreen_current_params', JSON.stringify(getCurrentParams()));
+        }
+
+        function loadSavedParameters() {
+            try {
+                const saved = localStorage.getItem('descreen_current_params');
+                if (saved) {
+                    const p = JSON.parse(saved);
+                    applyParams(p);
+                }
+            } catch (e) {
+                console.error("Failed loading saved params", e);
+            }
+        }
+
+        function resetToDefaultParams() {
+            applyParams(BUILTIN_PRESETS.default.params);
+            document.getElementById('preset-select').value = 'builtin:default';
+            document.getElementById('btn-delete-preset').disabled = true;
+        }
+
+        function setupEventListeners() {
+            document.getElementById('file-input').addEventListener('change', handleFileSelect);
+
+            const sliderIds = ['sens', 'radius', 'order', 'gain', 'gamma', 'denoise', 'edge', 'sharp'];
+            sliderIds.forEach(id => {
+                const slider = document.getElementById(`${id}-slider`);
+                const valDisplay = document.getElementById(`${id}-val`);
+                if (slider && valDisplay) {
+                    slider.addEventListener('input', (e) => {
+                        let val = e.target.value;
+                        if (id === 'radius') val += ' px';
+                        if (id === 'denoise' || id === 'edge' || id === 'sharp') val += '%';
+                        if (id === 'sens') val += 'x';
+                        valDisplay.textContent = val;
+
+                        saveCurrentParametersToStorage();
+                        requestPipelineExecution(id === 'sens' || id === 'radius' || id === 'order');
+                    });
+                }
+            });
+
+            document.getElementById('channel-select').addEventListener('change', () => {
+                saveCurrentParametersToStorage();
+                cachedFft.valid = false;
+                requestPipelineExecution(true);
+            });
+
+            document.getElementById('chk-diff-mode').addEventListener('change', () => {
+                requestPipelineExecution(false);
+            });
+        }
+
+        function requestPipelineExecution(recomputePeaks = false) {
+            if (isRenderPending) return;
+            isRenderPending = true;
+            requestAnimationFrame(() => {
+                if (recomputePeaks) {
+                    autoDetectFFTPeaks();
+                } else {
+                    executeFullFFTPipeline();
+                }
+                isRenderPending = false;
+            });
+        }
+
+        function setupSplitSlider() {
+            const container = document.getElementById('viewport-container');
+            const splitBar = document.getElementById('split-bar');
+            const afterWrapper = document.getElementById('after-wrapper');
+
+            let isDragging = false;
+
+            function updateSplit(x) {
+                const rect = container.getBoundingClientRect();
+                let pct = ((x - rect.left) / rect.width) * 100;
+                pct = Math.max(0, Math.min(100, pct));
+
+                splitBar.style.left = `${pct}%`;
+                afterWrapper.style.clipPath = `polygon(${pct}% 0, 100% 0, 100% 100%, ${pct}% 100%)`;
+            }
+
+            splitBar.addEventListener('mousedown', () => isDragging = true);
+            window.addEventListener('mouseup', () => isDragging = false);
+            window.addEventListener('mousemove', (e) => {
+                if (isDragging) updateSplit(e.clientX);
+            });
+
+            splitBar.addEventListener('touchstart', () => isDragging = true);
+            window.addEventListener('touchend', () => isDragging = false);
+            window.addEventListener('touchmove', (e) => {
+                if (isDragging && e.touches.length > 0) updateSplit(e.touches[0].clientX);
+            });
+
+            updateSplit(container.getBoundingClientRect().width / 2);
+        }
+
+        function setupSpectrumInteractivity() {
+            let isDrawing = false;
+
+            function paintNotch(e) {
+                const rect = cvsSpectrum.getBoundingClientRect();
+                const scaleX = FFT_SIZE / rect.width;
+                const scaleY = FFT_SIZE / rect.height;
+
+                const x = Math.floor((e.clientX - rect.left) * scaleX);
+                const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+                const radius = parseInt(document.getElementById('radius-slider').value);
+                const order = parseInt(document.getElementById('order-slider').value);
+
+                applyButterworthNotch(x, y, radius, order);
+                requestPipelineExecution(false);
+            }
+
+            cvsSpectrum.addEventListener('mousedown', (e) => {
+                isDrawing = true;
+                paintNotch(e);
+            });
+            window.addEventListener('mouseup', () => isDrawing = false);
+            cvsSpectrum.addEventListener('mousemove', (e) => {
+                if (isDrawing) paintNotch(e);
+            });
+        }
+
+        function setupNavigatorInteractivity() {
+            const container = document.getElementById('nav-container');
+            const box = document.getElementById('nav-roi-box');
+            let isDragging = false;
+
+            function moveROI(e) {
+                if (!imageLoaded) return;
+                const rect = container.getBoundingClientRect();
+                const clickX = e.clientX - rect.left;
+                const clickY = e.clientY - rect.top;
+
+                const scaleX = originalImg.width / rect.width;
+                const scaleY = originalImg.height / rect.height;
+
+                roiX = Math.max(0, Math.min(originalImg.width - FFT_SIZE, Math.floor(clickX * scaleX - FFT_SIZE / 2)));
+                roiY = Math.max(0, Math.min(originalImg.height - FFT_SIZE, Math.floor(clickY * scaleY - FFT_SIZE / 2)));
+
+                updateNavRoiBoxPosition();
+                cachedFft.valid = false;
+                executeFullFFTPipeline();
+            }
+
+            box.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                e.stopPropagation();
+            });
+            container.addEventListener('mousedown', moveROI);
+            window.addEventListener('mouseup', () => isDragging = false);
+            container.addEventListener('mousemove', (e) => {
+                if (isDragging) moveROI(e);
+            });
+        }
+
+        function setupDragAndDrop() {
+            const dropTarget = document.getElementById('main-drop-target');
+            dropTarget.addEventListener('dragover', (e) => {
+                e.preventDefault();
+            });
+            dropTarget.addEventListener('drop', (e) => {
+                e.preventDefault();
+                if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+                    handleFileSelect({ target: { files: e.dataTransfer.files } });
+                }
+            });
+        }
+
+        function updateNavRoiBoxPosition() {
+            if (!imageLoaded) return;
+            const container = document.getElementById('nav-container');
+            const box = document.getElementById('nav-roi-box');
+            const rect = container.getBoundingClientRect();
+
+            const scaleX = rect.width / originalImg.width;
+            const scaleY = rect.height / originalImg.height;
+
+            const w = Math.max(10, FFT_SIZE * scaleX);
+            const h = Math.max(10, FFT_SIZE * scaleY);
+
+            box.style.width = `${w}px`;
+            box.style.height = `${h}px`;
+            box.style.left = `${roiX * scaleX}px`;
+            box.style.top = `${roiY * scaleY}px`;
+        }
+
+        function bitReverse(n, bits) {
+            let reversed = 0;
+            for (let i = 0; i < bits; i++) {
+                reversed = (reversed << 1) | (n & 1);
+                n >>= 1;
+            }
+            return reversed;
+        }
+
+        function fft1d(re, im, N, invert) {
+            const bits = Math.round(Math.log2(N));
+            for (let i = 0; i < N; i++) {
+                const j = bitReverse(i, bits);
+                if (i < j) {
+                    let tmpR = re[i]; re[i] = re[j]; re[j] = tmpR;
+                    let tmpI = im[i]; im[i] = im[j]; im[j] = tmpI;
+                }
+            }
+            for (let len = 2; len <= N; len <<= 1) {
+                const half = len >> 1;
+                const angle = (2 * Math.PI / len) * (invert ? 1 : -1);
+                const wlenR = Math.cos(angle);
+                const wlenI = Math.sin(angle);
+                for (let i = 0; i < N; i += len) {
+                    let wR = 1.0;
+                    let wI = 0.0;
+                    for (let j = 0; j < half; j++) {
+                        const uR = re[i + j];
+                        const uI = im[i + j];
+                        const vR = re[i + j + half] * wR - im[i + j + half] * wI;
+                        const vI = re[i + j + half] * wI + im[i + j + half] * wR;
+                        re[i + j] = uR + vR;
+                        im[i + j] = uI + vI;
+                        re[i + j + half] = uR - vR;
+                        im[i + j + half] = uI - vI;
+                        const nextWR = wR * wlenR - wI * wlenI;
+                        const nextWI = wR * wlenI + wI * wlenR;
+                        wR = nextWR;
+                        wI = nextWI;
+                    }
+                }
+            }
+            if (invert) {
+                for (let i = 0; i < N; i++) {
+                    re[i] /= N;
+                    im[i] /= N;
+                }
+            }
+        }
+
+        function fft2d(re, im, size, invert) {
+            for (let y = 0; y < size; y++) {
+                const offset = y * size;
+                const rowR = re.subarray(offset, offset + size);
+                const rowI = im.subarray(offset, offset + size);
+                fft1d(rowR, rowI, size, invert);
+            }
+            const colR = new Float64Array(size);
+            const colI = new Float64Array(size);
+            for (let x = 0; x < size; x++) {
+                for (let y = 0; y < size; y++) {
+                    colR[y] = re[y * size + x];
+                    colI[y] = im[y * size + x];
+                }
+                fft1d(colR, colI, size, invert);
+                for (let y = 0; y < size; y++) {
+                    re[y * size + x] = colR[y];
+                    im[y * size + x] = colI[y];
+                }
+            }
+        }
+
+        function applyButterworthNotch(u0, v0, radius, order) {
+            const u1 = FFT_SIZE - u0;
+            const v1 = FFT_SIZE - v0;
+
+            for (let y = 0; y < FFT_SIZE; y++) {
+                for (let x = 0; x < FFT_SIZE; x++) {
+                    const idx = y * FFT_SIZE + x;
+                    const d1 = Math.sqrt((x - u0)**2 + (y - v0)**2);
+                    const d2 = Math.sqrt((x - u1)**2 + (y - v1)**2);
+
+                    const h1 = 1 / (1 + (radius / Math.max(0.001, d1))**(2 * order));
+                    const h2 = 1 / (1 + (radius / Math.max(0.001, d2))**(2 * order));
+
+                    notchMask[idx] *= Math.min(h1, h2);
+                }
+            }
+        }
+
+        function resetNotchMask() {
+            notchMask.fill(1.0);
+            executeFullFFTPipeline();
+            showToast(getTranslation('toastMaskReset'));
+        }
+
+        function autoDetectFFTPeaks() {
+            if (!imageLoaded) return;
+
+            notchMask.fill(1.0);
+
+            // Compute Forward FFT only if not cached
+            ensureCachedROIForwardFFT();
+
+            // Compute log-magnitude map
+            const logMag = new Float32Array(FFT_SIZE * FFT_SIZE);
+            for (let y = 0; y < FFT_SIZE; y++) {
+                const sy = (y + HALF) % FFT_SIZE;
+                for (let x = 0; x < FFT_SIZE; x++) {
+                    const sx = (x + HALF) % FFT_SIZE;
+                    const sIdx = sy * FFT_SIZE + sx;
+                    const oIdx = y * FFT_SIZE + x;
+
+                    const magR = Math.sqrt(cachedFft.reR[sIdx]**2 + cachedFft.imR[sIdx]**2);
+                    const magG = Math.sqrt(cachedFft.reG[sIdx]**2 + cachedFft.imG[sIdx]**2);
+                    const magB = Math.sqrt(cachedFft.reB[sIdx]**2 + cachedFft.imB[sIdx]**2);
+                    const magY = 0.299 * magR + 0.587 * magG + 0.114 * magB;
+
+                    logMag[oIdx] = Math.log(1 + magY);
+                }
+            }
+
+            // Enhanced Top-Hat Local Contrast Subtraction (Box blur background estimate)
+            const diff = new Float32Array(FFT_SIZE * FFT_SIZE);
+            let meanDiff = 0;
+            let countDiff = 0;
+
+            for (let y = 3; y < FFT_SIZE - 3; y++) {
+                for (let x = 3; x < FFT_SIZE - 3; x++) {
+                    const idx = y * FFT_SIZE + x;
+                    let bg = 0;
+                    for (let dy = -3; dy <= 3; dy++) {
+                        for (let dx = -3; dx <= 3; dx++) {
+                            bg += logMag[(y + dy) * FFT_SIZE + (x + dx)];
+                        }
+                    }
+                    bg /= 49;
+                    diff[idx] = Math.max(0, logMag[idx] - bg);
+
+                    const dist = Math.sqrt((x - HALF)**2 + (y - HALF)**2);
+                    if (dist > DC_RADIUS) {
+                        meanDiff += diff[idx];
+                        countDiff++;
+                    }
+                }
+            }
+
+            meanDiff /= (countDiff || 1);
+            let varSum = 0;
+            for (let y = 3; y < FFT_SIZE - 3; y++) {
+                for (let x = 3; x < FFT_SIZE - 3; x++) {
+                    const dist = Math.sqrt((x - HALF)**2 + (y - HALF)**2);
+                    if (dist > DC_RADIUS) {
+                        const val = diff[y * FFT_SIZE + x];
+                        varSum += (val - meanDiff)**2;
+                    }
+                }
+            }
+
+            const stdDev = Math.sqrt(varSum / (countDiff || 1));
+            const sensitivity = parseFloat(document.getElementById('sens-slider').value);
+            const threshold = meanDiff + stdDev * sensitivity;
+
+            const radius = parseInt(document.getElementById('radius-slider').value);
+            const order = parseInt(document.getElementById('order-slider').value);
+
+            let detectedPeaksCount = 0;
+            const peakVisited = new Uint8Array(FFT_SIZE * FFT_SIZE);
+
+            for (let y = 3; y < FFT_SIZE - 3; y++) {
+                for (let x = 3; x < FFT_SIZE - 3; x++) {
+                    const idx = y * FFT_SIZE + x;
+                    if (peakVisited[idx]) continue;
+
+                    const val = diff[idx];
+                    const dist = Math.sqrt((x - HALF)**2 + (y - HALF)**2);
+
+                    if (dist > DC_RADIUS && val > threshold) {
+                        // 3x3 Local Maxima Check
+                        let isMax = true;
+                        for (let dy = -1; dy <= 1 && isMax; dy++) {
+                            for (let dx = -1; dx <= 1 && isMax; dx++) {
+                                if (dx === 0 && dy === 0) continue;
+                                if (diff[(y + dy) * FFT_SIZE + (x + dx)] > val) isMax = false;
+                            }
+                        }
+
+                        if (isMax) {
+                            // SYMMETRY CHECK: Periodic Halftone grid peaks must exist in symmetric pairs around DC!
+                            const symX = FFT_SIZE - x;
+                            const symY = FFT_SIZE - y;
+                            const symVal = diff[symY * FFT_SIZE + symX];
+
+                            if (symVal > threshold * 0.5) {
+                                applyButterworthNotch(x, y, radius, order);
+                                peakVisited[idx] = 1;
+                                peakVisited[symY * FFT_SIZE + symX] = 1;
+                                detectedPeaksCount++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            document.getElementById('info-peaks').textContent = `${detectedPeaksCount}`;
+            executeFullFFTPipeline();
+        }
+
+        function ensureCachedROIForwardFFT() {
+            if (cachedFft.valid) return;
+
+            ctxRoiBefore.drawImage(originalImg, roiX, roiY, FFT_SIZE, FFT_SIZE, 0, 0, FFT_SIZE, FFT_SIZE);
+            const srcImageData = ctxRoiBefore.getImageData(0, 0, FFT_SIZE, FFT_SIZE);
+            const srcBuf = srcImageData.data;
+
+            for (let i = 0; i < FFT_SIZE * FFT_SIZE; i++) {
+                cachedFft.reR[i] = srcBuf[i*4];   cachedFft.imR[i] = 0.0;
+                cachedFft.reG[i] = srcBuf[i*4+1]; cachedFft.imG[i] = 0.0;
+                cachedFft.reB[i] = srcBuf[i*4+2]; cachedFft.imB[i] = 0.0;
+            }
+
+            fft2d(cachedFft.reR, cachedFft.imR, FFT_SIZE, false);
+            fft2d(cachedFft.reG, cachedFft.imG, FFT_SIZE, false);
+            fft2d(cachedFft.reB, cachedFft.imB, FFT_SIZE, false);
+
+            cachedFft.valid = true;
+        }
+
+        function executeFullFFTPipeline() {
+            if (!imageLoaded) return;
+
+            ensureCachedROIForwardFFT();
+
+            // Create working buffers for IFFT
+            const workReR = new Float64Array(cachedFft.reR);
+            const workImR = new Float64Array(cachedFft.imR);
+            const workReG = new Float64Array(cachedFft.reG);
+            const workImG = new Float64Array(cachedFft.imG);
+            const workReB = new Float64Array(cachedFft.reB);
+            const workImB = new Float64Array(cachedFft.imB);
+
+            // Render Spectrum Canvas
+            const specImgData = ctxSpectrum.createImageData(FFT_SIZE, FFT_SIZE);
+            const specBuf = specImgData.data;
+
+            const gain = parseFloat(document.getElementById('gain-slider').value);
+            const gamma = parseFloat(document.getElementById('gamma-slider').value);
+
+            for (let y = 0; y < FFT_SIZE; y++) {
+                const sy = (y + HALF) % FFT_SIZE;
+                for (let x = 0; x < FFT_SIZE; x++) {
+                    const sx = (x + HALF) % FFT_SIZE;
+                    const sIdx = sy * FFT_SIZE + sx;
+                    const oIdx = y * FFT_SIZE + x;
+
+                    const magR = Math.sqrt(workReR[sIdx]**2 + workImR[sIdx]**2);
+                    const magG = Math.sqrt(workReG[sIdx]**2 + workImG[sIdx]**2);
+                    const magB = Math.sqrt(workReB[sIdx]**2 + workImB[sIdx]**2);
+                    const magY = 0.299*magR + 0.587*magG + 0.114*magB;
+
+                    let intensity = Math.pow(Math.log(1 + magY) * (gain * 0.8), gamma) * 14;
+                    intensity = Math.min(255, Math.max(0, intensity));
+
+                    const maskVal = notchMask[oIdx];
+
+                    specBuf[oIdx*4]   = Math.round(intensity * maskVal);
+                    specBuf[oIdx*4+1] = Math.round(intensity * maskVal);
+                    specBuf[oIdx*4+2] = Math.round(intensity * (maskVal < 0.9 ? 0.2 : 1.0));
+                    specBuf[oIdx*4+3] = 255;
+
+                    // Apply Notch Mask
+                    workReR[sIdx] *= maskVal; workImR[sIdx] *= maskVal;
+                    workReG[sIdx] *= maskVal; workImG[sIdx] *= maskVal;
+                    workReB[sIdx] *= maskVal; workImB[sIdx] *= maskVal;
+                }
+            }
+
+            ctxSpectrum.putImageData(specImgData, 0, 0);
+
+            // Inverse 2D FFT
+            fft2d(workReR, workImR, FFT_SIZE, true);
+            fft2d(workReG, workImG, FFT_SIZE, true);
+            fft2d(workReB, workImB, FFT_SIZE, true);
+
+            const dstImageData = ctxRoiAfter.createImageData(FFT_SIZE, FFT_SIZE);
+            const dstBuf = dstImageData.data;
+
+            const srcImageData = ctxRoiBefore.getImageData(0, 0, FFT_SIZE, FFT_SIZE);
+            const srcBuf = srcImageData.data;
+
+            const sharpen = parseInt(document.getElementById('sharp-slider').value) / 100;
+            const diffMode = document.getElementById('chk-diff-mode').checked;
+
+            for (let i = 0; i < FFT_SIZE * FFT_SIZE; i++) {
+                let r = workReR[i];
+                let g = workReG[i];
+                let b = workReB[i];
+
+                if (diffMode) {
+                    const diffR = Math.abs(srcBuf[i*4] - r) * 3;
+                    const diffG = Math.abs(srcBuf[i*4+1] - g) * 3;
+                    const diffB = Math.abs(srcBuf[i*4+2] - b) * 3;
+                    dstBuf[i*4]   = Math.min(255, diffR);
+                    dstBuf[i*4+1] = Math.min(255, diffG);
+                    dstBuf[i*4+2] = Math.min(255, diffB);
+                    dstBuf[i*4+3] = 255;
+                    continue;
+                }
+
+                if (sharpen > 0) {
+                    r += (r - srcBuf[i*4]) * (sharpen * 0.4);
+                    g += (g - srcBuf[i*4+1]) * (sharpen * 0.4);
+                    b += (b - srcBuf[i*4+2]) * (sharpen * 0.4);
+                }
+
+                dstBuf[i*4]   = Math.min(255, Math.max(0, r));
+                dstBuf[i*4+1] = Math.min(255, Math.max(0, g));
+                dstBuf[i*4+2] = Math.min(255, Math.max(0, b));
+                dstBuf[i*4+3] = 255;
+            }
+
+            // High Quality Guided Edge-Preserving Denoise
+            const denoiseVal = parseInt(document.getElementById('denoise-slider').value);
+            if (denoiseVal > 0 && !diffMode) {
+                applyFastGuidedFilter(dstImageData, FFT_SIZE, FFT_SIZE, denoiseVal);
+            }
+
+            // Adaptive Edge Anti-Alias Filter for Residual Border Halftones
+            const edgeVal = parseInt(document.getElementById('edge-slider').value);
+            if (edgeVal > 0 && !diffMode) {
+                applyEdgeAntiMoireFilter(dstImageData, FFT_SIZE, FFT_SIZE, edgeVal);
+            }
+
+            ctxRoiAfter.putImageData(dstImageData, 0, 0);
+        }
+
+        function applyFastGuidedFilter(imgData, w, h, strength) {
+            const data = imgData.data;
+            const radius = 2;
+            const eps = (strength / 100) * 0.05;
+            const temp = new Uint8ClampedArray(data);
+
+            for (let y = radius; y < h - radius; y++) {
+                for (let x = radius; x < w - radius; x++) {
+                    const idx = (y * w + x) * 4;
+
+                    let meanR = 0, meanG = 0, meanB = 0;
+                    let count = 0;
+
+                    for (let dy = -radius; dy <= radius; dy++) {
+                        for (let dx = -radius; dx <= radius; dx++) {
+                            const nIdx = ((y + dy) * w + (x + dx)) * 4;
+                            meanR += temp[nIdx];
+                            meanG += temp[nIdx + 1];
+                            meanB += temp[nIdx + 2];
+                            count++;
+                        }
+                    }
+
+                    meanR /= count;
+                    meanG /= count;
+                    meanB /= count;
+
+                    const weight = 1 - eps;
+                    data[idx]     = Math.round(temp[idx] * (1 - weight) + meanR * weight);
+                    data[idx + 1] = Math.round(temp[idx + 1] * (1 - weight) + meanG * weight);
+                    data[idx + 2] = Math.round(temp[idx + 2] * (1 - weight) + meanB * weight);
+                }
+            }
+        }
+
+        function applyEdgeAntiMoireFilter(imgData, w, h, strength) {
+            const data = imgData.data;
+            const blendFactor = strength / 100.0;
+            const temp = new Uint8ClampedArray(data);
+
+            const neighborhoodR = new Float32Array(9);
+            const neighborhoodG = new Float32Array(9);
+            const neighborhoodB = new Float32Array(9);
+
+            for (let y = 1; y < h - 1; y++) {
+                for (let x = 1; x < w - 1; x++) {
+                    const idx = (y * w + x) * 4;
+
+                    // Calculate local luminance gradient (Sobel operator for edge detection)
+                    const lumaC = 0.299 * temp[idx] + 0.587 * temp[idx + 1] + 0.114 * temp[idx + 2];
+                    const lumaR = 0.299 * temp[idx + 4] + 0.587 * temp[idx + 5] + 0.114 * temp[idx + 6];
+                    const lumaL = 0.299 * temp[idx - 4] + 0.587 * temp[idx - 3] + 0.114 * temp[idx - 2];
+                    const lumaB = 0.299 * temp[((y + 1) * w + x) * 4] + 0.587 * temp[((y + 1) * w + x) * 4 + 1] + 0.114 * temp[((y + 1) * w + x) * 4 + 2];
+                    const lumaT = 0.299 * temp[((y - 1) * w + x) * 4] + 0.587 * temp[((y - 1) * w + x) * 4 + 1] + 0.114 * temp[((y - 1) * w + x) * 4 + 2];
+
+                    const gradX = Math.abs(lumaR - lumaL);
+                    const gradY = Math.abs(lumaB - lumaT);
+                    const edgeMagnitude = gradX + gradY;
+
+                    // Apply adaptive edge median smoothing only on high-gradient contrast transitions
+                    if (edgeMagnitude > 18) {
+                        let k = 0;
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                const nIdx = ((y + dy) * w + (x + dx)) * 4;
+                                neighborhoodR[k] = temp[nIdx];
+                                neighborhoodG[k] = temp[nIdx + 1];
+                                neighborhoodB[k] = temp[nIdx + 2];
+                                k++;
+                            }
+                        }
+
+                        neighborhoodR.sort();
+                        neighborhoodG.sort();
+                        neighborhoodB.sort();
+
+                        const medR = neighborhoodR[4];
+                        const medG = neighborhoodG[4];
+                        const medB = neighborhoodB[4];
+
+                        // Smooth blend based on edge magnitude and slider strength
+                        const edgeWeight = Math.min(1.0, (edgeMagnitude - 18) / 80.0) * blendFactor;
+
+                        data[idx]     = Math.round(temp[idx] * (1 - edgeWeight) + medR * edgeWeight);
+                        data[idx + 1] = Math.round(temp[idx + 1] * (1 - edgeWeight) + medG * edgeWeight);
+                        data[idx + 2] = Math.round(temp[idx + 2] * (1 - edgeWeight) + medB * edgeWeight);
+                    }
+                }
+            }
+        }
+
+        function loadSampleImage() {
+            originalFileName = 'sample.png';
+            showLoadingSpinner(getTranslation('msgGenSample'));
+            setTimeout(() => {
+                const cvs = document.createElement('canvas');
+                cvs.width = 1024;
+                cvs.height = 768;
+                const ctx = cvs.getContext('2d');
+
+                const grad = ctx.createLinearGradient(0, 0, 1024, 768);
+                grad.addColorStop(0, '#38bdf8');
+                grad.addColorStop(0.5, '#818cf8');
+                grad.addColorStop(1, '#c084fc');
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, 1024, 768);
+
+                ctx.fillStyle = '#ffffff';
+                ctx.beginPath();
+                ctx.arc(320, 300, 130, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = '#0f172a';
+                ctx.font = 'bold 44px sans-serif';
+                ctx.fillText('Halftone Print Scan 600 DPI', 160, 520);
+
+                const imgData = ctx.getImageData(0, 0, 1024, 768);
+                const buf = imgData.data;
+
+                // Add synthetic Halftone Grid
+                for (let y = 0; y < 768; y++) {
+                    for (let x = 0; x < 1024; x++) {
+                        const idx = (y * 1024 + x) * 4;
+                        const u = x * Math.cos(Math.PI/4) - y * Math.sin(Math.PI/4);
+                        const v = x * Math.sin(Math.PI/4) + y * Math.cos(Math.PI/4);
+
+                        const dot = (Math.sin(u * 0.38) * Math.cos(v * 0.38)) * 38;
+
+                        buf[idx]   = Math.min(255, Math.max(0, buf[idx] + dot));
+                        buf[idx+1] = Math.min(255, Math.max(0, buf[idx+1] + dot));
+                        buf[idx+2] = Math.min(255, Math.max(0, buf[idx+2] + dot));
+                    }
+                }
+
+                ctx.putImageData(imgData, 0, 0);
+
+                const img = new Image();
+                img.onload = function() {
+                    setLoadedImage(img);
+                    hideLoadingSpinner();
+                };
+                img.src = cvs.toDataURL();
+            }, 50);
+        }
+
+        function handleFileSelect(evt) {
+            const file = evt.target.files[0];
+            if (!file) return;
+
+            originalFileName = file.name;
+            showLoadingSpinner(getTranslation('msgReadingFile'));
+
+            if (file.name.toLowerCase().endsWith('.tif') || file.name.toLowerCase().endsWith('.tiff')) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const ifds = UTIF.decode(e.target.result);
+                        UTIF.decodeImage(e.target.result, ifds[0]);
+                        const rgba = UTIF.toRGBA8(ifds[0]);
+                        const cvs = document.createElement('canvas');
+                        cvs.width = ifds[0].width;
+                        cvs.height = ifds[0].height;
+                        const ctx = cvs.getContext('2d');
+                        const imgData = ctx.createImageData(cvs.width, cvs.height);
+                        imgData.data.set(rgba);
+                        ctx.putImageData(imgData, 0, 0);
+
+                        const img = new Image();
+                        img.onload = () => {
+                            setLoadedImage(img);
+                            hideLoadingSpinner();
+                        };
+                        img.src = cvs.toDataURL();
+                    } catch (err) {
+                        hideLoadingSpinner();
+                        showToast("TIFF Error: " + err.message);
+                    }
+                };
+                reader.readAsArrayBuffer(file);
+            } else {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = () => {
+                        setLoadedImage(img);
+                        hideLoadingSpinner();
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function setLoadedImage(img) {
+            originalImg = img;
+            imageLoaded = true;
+
+            document.getElementById('info-res').textContent = `${img.width} x ${img.height} px`;
+            document.getElementById('btn-download').disabled = false;
+
+            cvsNavThumb.width = img.width;
+            cvsNavThumb.height = img.height;
+            ctxNavThumb.drawImage(img, 0, 0);
+
+            roiX = Math.floor((img.width - FFT_SIZE) / 2);
+            roiY = Math.floor((img.height - FFT_SIZE) / 2);
+
+            updateNavRoiBoxPosition();
+            cachedFft.valid = false;
+            autoDetectFFTPeaks();
+            showToast(getTranslation('toastLoaded'));
+        }
+
+        async function downloadFullCleanResult() {
+            if (!imageLoaded) return;
+
+            showLoadingSpinner(getTranslation('msgFullFFT'));
+            await new Promise(r => setTimeout(r, 60));
+
+            try {
+                const W = originalImg.width;
+                const H = originalImg.height;
+
+                const origCvs = document.createElement('canvas');
+                origCvs.width = W; origCvs.height = H;
+                const origCtx = origCvs.getContext('2d');
+                origCtx.drawImage(originalImg, 0, 0);
+                const fullSrc = origCtx.getImageData(0, 0, W, H).data;
+
+                const accR = new Float32Array(W * H);
+                const accG = new Float32Array(W * H);
+                const accB = new Float32Array(W * H);
+                const accWeight = new Float32Array(W * H);
+
+                // 2D Hann Window
+                const window2D = new Float32Array(FFT_SIZE * FFT_SIZE);
+                for (let ty = 0; ty < FFT_SIZE; ty++) {
+                    const wy = 0.5 * (1 - Math.cos((2 * Math.PI * ty) / (FFT_SIZE - 1)));
+                    for (let tx = 0; tx < FFT_SIZE; tx++) {
+                        const wx = 0.5 * (1 - Math.cos((2 * Math.PI * tx) / (FFT_SIZE - 1)));
+                        window2D[ty * FFT_SIZE + tx] = wx * wy;
+                    }
+                }
+
+                const stride = 128;
+                const tilesY = Math.ceil((H - FFT_SIZE) / stride) + 1;
+                const tilesX = Math.ceil((W - FFT_SIZE) / stride) + 1;
+                const totalTiles = Math.max(1, tilesX * tilesY);
+                let processedTiles = 0;
+
+                const tileReR = new Float64Array(FFT_SIZE * FFT_SIZE);
+                const tileImR = new Float64Array(FFT_SIZE * FFT_SIZE);
+                const tileReG = new Float64Array(FFT_SIZE * FFT_SIZE);
+                const tileImG = new Float64Array(FFT_SIZE * FFT_SIZE);
+                const tileReB = new Float64Array(FFT_SIZE * FFT_SIZE);
+                const tileImB = new Float64Array(FFT_SIZE * FFT_SIZE);
+
+                for (let y0 = 0; y0 < H; y0 += stride) {
+                    let startY = y0;
+                    if (startY + FFT_SIZE > H) startY = Math.max(0, H - FFT_SIZE);
+
+                    for (let x0 = 0; x0 < W; x0 += stride) {
+                        let startX = x0;
+                        if (startX + FFT_SIZE > W) startX = Math.max(0, W - FFT_SIZE);
+
+                        for (let ty = 0; ty < FFT_SIZE; ty++) {
+                            const py = Math.min(H - 1, startY + ty);
+                            for (let tx = 0; tx < FFT_SIZE; tx++) {
+                                const px = Math.min(W - 1, startX + tx);
+                                const idx = (py * W + px) * 4;
+                                const tIdx = ty * FFT_SIZE + tx;
+
+                                tileReR[tIdx] = fullSrc[idx];   tileImR[tIdx] = 0.0;
+                                tileReG[tIdx] = fullSrc[idx+1]; tileImG[tIdx] = 0.0;
+                                tileReB[tIdx] = fullSrc[idx+2]; tileImB[tIdx] = 0.0;
+                            }
+                        }
+
+                        fft2d(tileReR, tileImR, FFT_SIZE, false);
+                        fft2d(tileReG, tileImG, FFT_SIZE, false);
+                        fft2d(tileReB, tileImB, FFT_SIZE, false);
+
+                        for (let ty = 0; ty < FFT_SIZE; ty++) {
+                            const sy = (ty + HALF) % FFT_SIZE;
+                            for (let tx = 0; tx < FFT_SIZE; tx++) {
+                                const sx = (tx + HALF) % FFT_SIZE;
+                                const sIdx = sy * FFT_SIZE + sx;
+                                const oIdx = ty * FFT_SIZE + tx;
+
+                                const maskVal = notchMask[oIdx];
+                                tileReR[sIdx] *= maskVal; tileImR[sIdx] *= maskVal;
+                                tileReG[sIdx] *= maskVal; tileImG[sIdx] *= maskVal;
+                                tileReB[sIdx] *= maskVal; tileImB[sIdx] *= maskVal;
+                            }
+                        }
+
+                        fft2d(tileReR, tileImR, FFT_SIZE, true);
+                        fft2d(tileReG, tileImG, FFT_SIZE, true);
+                        fft2d(tileReB, tileImB, FFT_SIZE, true);
+
+                        for (let ty = 0; ty < FFT_SIZE; ty++) {
+                            const py = startY + ty;
+                            if (py >= H) continue;
+                            for (let tx = 0; tx < FFT_SIZE; tx++) {
+                                const px = startX + tx;
+                                if (px >= W) continue;
+
+                                const tIdx = ty * FFT_SIZE + tx;
+                                const gIdx = py * W + px;
+                                const w = window2D[tIdx];
+
+                                accR[gIdx] += tileReR[tIdx] * w;
+                                accG[gIdx] += tileReG[tIdx] * w;
+                                accB[gIdx] += tileReB[tIdx] * w;
+                                accWeight[gIdx] += w;
+                            }
+                        }
+
+                        processedTiles++;
+                        if (processedTiles % 12 === 0) {
+                            const pct = Math.round((processedTiles / totalTiles) * 100);
+                            showLoadingSpinner(`${getTranslation('msgFFTProgress')} ${pct}%`);
+                            await new Promise(r => setTimeout(r, 0));
+                        }
+                    }
+                }
+
+                const outCvs = document.createElement('canvas');
+                outCvs.width = W; outCvs.height = H;
+                const outCtx = outCvs.getContext('2d');
+                const outImgData = outCtx.createImageData(W, H);
+                const outBuf = outImgData.data;
+
+                const sharpen = parseInt(document.getElementById('sharp-slider').value) / 100;
+
+                for (let i = 0; i < W * H; i++) {
+                    const w = accWeight[i] || 1.0;
+                    let r = accR[i] / w;
+                    let g = accG[i] / w;
+                    let b = accB[i] / w;
+
+                    const idx = i * 4;
+                    if (sharpen > 0) {
+                        r += (r - fullSrc[idx]) * (sharpen * 0.4);
+                        g += (g - fullSrc[idx+1]) * (sharpen * 0.4);
+                        b += (b - fullSrc[idx+2]) * (sharpen * 0.4);
+                    }
+
+                    outBuf[idx]   = Math.min(255, Math.max(0, r));
+                    outBuf[idx+1] = Math.min(255, Math.max(0, g));
+                    outBuf[idx+2] = Math.min(255, Math.max(0, b));
+                    outBuf[idx+3] = 255;
+                }
+
+                const denoiseVal = parseInt(document.getElementById('denoise-slider').value);
+                if (denoiseVal > 0) {
+                    applyFastGuidedFilter(outImgData, W, H, denoiseVal);
+                }
+
+                const edgeVal = parseInt(document.getElementById('edge-slider').value);
+                if (edgeVal > 0) {
+                    applyEdgeAntiMoireFilter(outImgData, W, H, edgeVal);
+                }
+
+                outCtx.putImageData(outImgData, 0, 0);
+
+                // Derive output filename with _DS suffix
+                let baseName = 'scan';
+                if (originalFileName) {
+                    const lastDot = originalFileName.lastIndexOf('.');
+                    baseName = lastDot > 0 ? originalFileName.substring(0, lastDot) : originalFileName;
+                }
+
+                const link = document.createElement('a');
+                link.download = `${baseName}_DS.png`;
+                link.href = outCvs.toDataURL('image/png');
+                link.click();
+
+                executeFullFFTPipeline();
+                showToast(`Cleaned scan (${W}x${H}) saved as ${baseName}_DS.png!`);
+            } catch (err) {
+                console.error(err);
+                showToast("Export error: " + err.message);
+            } finally {
+                hideLoadingSpinner();
+            }
+        }
+
+        function showLoadingSpinner(msg) {
+            document.getElementById('loading-text').textContent = msg || getTranslation('msgProcessing');
+            document.getElementById('loading-overlay').classList.remove('hidden');
+        }
+
+        function hideLoadingSpinner() {
+            document.getElementById('loading-overlay').classList.add('hidden');
+        }
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            document.getElementById('toast-msg').textContent = msg;
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 3000);
+        }
+    </script>
+</body>
+</html>
