@@ -83,6 +83,8 @@ def train(cfg: TrainConfig) -> dict:
                 pred = model(xs)
             L = loss_fn(pred.float(), ys)
             scaler.scale(L["total"]).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
             sched.step()

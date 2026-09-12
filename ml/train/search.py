@@ -44,15 +44,20 @@ def build_model(trial: optuna.Trial) -> tuple[FourierUNet, LossConfig, float]:
 
 
 def objective(trial: optuna.Trial) -> float:
+    import random
+
     torch.manual_seed(0)
     np.random.seed(0)
+    random.seed(0)
+    g = torch.Generator()
+    g.manual_seed(0)
     model, lcfg, lr = build_model(trial)
     trial.set_user_attr("params_M", round(model.param_count() / 1e6, 2))
     model.cuda()
     loss_fn = CompositeLoss(lcfg).cuda()
     train_ds = Subset(DescreenDataset(ROOT / "Data" / "synth", "train"), range(TRAIN_SUBSET))
     val_ds = Subset(DescreenDataset(ROOT / "Data" / "synth", "val"), range(VAL_SUBSET))
-    train_dl = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=2, pin_memory=True, drop_last=True)
+    train_dl = DataLoader(train_ds, batch_size=4, shuffle=True, num_workers=0, pin_memory=True, drop_last=True, generator=g)
     val_dl = DataLoader(val_ds, batch_size=1, num_workers=2, pin_memory=True)
     opt = torch.optim.Adam(model.parameters(), lr=lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=PROXY_EPOCHS * len(train_dl))
@@ -67,6 +72,8 @@ def objective(trial: optuna.Trial) -> float:
                 pred = model(xs)
             L = loss_fn(pred.float(), ys)
             scaler.scale(L["total"]).backward()
+            scaler.unscale_(opt)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             scaler.step(opt)
             scaler.update()
             sched.step()
