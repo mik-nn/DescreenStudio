@@ -1,6 +1,7 @@
 Data/
 ml/train/_*/
 ml/train/search.db
+ml/train/*.log
 ml/simulator/_*/
 __pycache__/
 *.pyc

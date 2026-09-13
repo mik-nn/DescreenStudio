@@ -32,7 +32,10 @@ class CompositeLoss(nn.Module):
         fp = torch.abs(torch.fft.rfft2(pred, norm="ortho"))
         ft = torch.abs(torch.fft.rfft2(target, norm="ortho"))
         loss_fourier = torch.mean(torch.abs(fp - ft) / (ft.mean() + 1e-6))
-        loss_lpips = self.lpips(2.0 * pred - 1.0, 2.0 * target - 1.0).mean()
+        if self.cfg.w_lpips > 0:
+            loss_lpips = self.lpips(2.0 * pred - 1.0, 2.0 * target - 1.0).mean()
+        else:
+            loss_lpips = torch.zeros((), device=pred.device)
         total = (
             self.cfg.w_l1 * loss_l1
             + self.cfg.w_msssim * loss_ms
