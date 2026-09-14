@@ -28,7 +28,7 @@ def evaluate(ckpt: Path, split: str = "val") -> list[dict]:
     by_id = {r["id"]: r for r in man}
     recs = []
     with torch.no_grad():
-        for (xs, ys), path in zip(dl, ds.scans):
+        for (xs, ys, _), path in zip(dl, ds.scans):
             pid = path.stem
             pr = m(xs.cuda()).float()
             mse = torch.mean((pr - ys.cuda()) ** 2).item()

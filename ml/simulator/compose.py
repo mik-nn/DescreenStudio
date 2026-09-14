@@ -17,6 +17,21 @@ def _paper_texture(h: int, w: int, strength: float, rng: np.random.Generator) ->
     return np.clip(1.0 + strength * tex, 0.5, 1.5).astype(np.float32)
 
 
+def print_masks(gt: np.ndarray, cfg: PrintConfig) -> dict[str, np.ndarray]:
+    gt = np.clip(gt.astype(np.float32), 0.0, 1.0)
+    h, w, _ = gt.shape
+    s = cfg.oversample
+    big = np.asarray(
+        Image.fromarray((gt * 255.0 + 0.5).astype(np.uint8)).resize(
+            (w * s, h * s), Image.LANCZOS
+        ),
+        dtype=np.float32,
+    ) / 255.0
+    inks = rgb_to_cmyk(big)
+    rng = np.random.default_rng(cfg.seed)
+    return {ch: halftone_channel(inks[ch], cfg, cfg.angles_deg[ch], rng) for ch in CHANNELS}
+
+
 def simulate_print(gt: np.ndarray, cfg: PrintConfig) -> np.ndarray:
     gt = np.clip(gt.astype(np.float32), 0.0, 1.0)
     h, w, _ = gt.shape

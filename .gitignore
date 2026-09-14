@@ -6,3 +6,7 @@ ml/simulator/_*/
 __pycache__/
 *.pyc
 *.pt
+ml/export/
+ml/analysis/_plates/
+ml/analysis/*.log
+ml/export.log

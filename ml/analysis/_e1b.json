@@ -1,0 +1,722 @@
+[
+ {
+  "rgb_resid_db": -3.64,
+  "cmyk_resid_db": -0.23,
+  "rgb_psnr": 16.29,
+  "cmyk_psnr": 16.28,
+  "id": "8mqOw4DBBSg",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -2.98,
+  "cmyk_resid_db": -0.19,
+  "rgb_psnr": 16.29,
+  "cmyk_psnr": 16.28,
+  "id": "8mqOw4DBBSg",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -10.71,
+  "cmyk_resid_db": -0.27,
+  "rgb_psnr": 16.3,
+  "cmyk_psnr": 16.28,
+  "id": "8mqOw4DBBSg",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -11.91,
+  "cmyk_resid_db": -0.25,
+  "rgb_psnr": 16.29,
+  "cmyk_psnr": 16.28,
+  "id": "8mqOw4DBBSg",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -2.96,
+  "cmyk_resid_db": -0.4,
+  "rgb_psnr": 17.86,
+  "cmyk_psnr": 17.84,
+  "id": "9Z1KRIfpBTM",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -2.24,
+  "cmyk_resid_db": -0.26,
+  "rgb_psnr": 17.85,
+  "cmyk_psnr": 17.84,
+  "id": "9Z1KRIfpBTM",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.43,
+  "cmyk_resid_db": -0.79,
+  "rgb_psnr": 17.88,
+  "cmyk_psnr": 17.86,
+  "id": "9Z1KRIfpBTM",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -10.39,
+  "cmyk_resid_db": -0.76,
+  "rgb_psnr": 17.87,
+  "cmyk_psnr": 17.85,
+  "id": "9Z1KRIfpBTM",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -3.9,
+  "cmyk_resid_db": -2.52,
+  "rgb_psnr": 17.63,
+  "cmyk_psnr": 17.62,
+  "id": "AZMmUy2qL6A",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -3.25,
+  "cmyk_resid_db": -2.17,
+  "rgb_psnr": 17.62,
+  "cmyk_psnr": 17.61,
+  "id": "AZMmUy2qL6A",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.76,
+  "cmyk_resid_db": -4.47,
+  "rgb_psnr": 17.68,
+  "cmyk_psnr": 17.66,
+  "id": "AZMmUy2qL6A",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -10.15,
+  "cmyk_resid_db": -4.44,
+  "rgb_psnr": 17.67,
+  "cmyk_psnr": 17.65,
+  "id": "AZMmUy2qL6A",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -12.82,
+  "cmyk_resid_db": -10.63,
+  "rgb_psnr": 15.35,
+  "cmyk_psnr": 15.33,
+  "id": "DqIyKlJa-2s",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -14.98,
+  "cmyk_resid_db": -12.42,
+  "rgb_psnr": 15.35,
+  "cmyk_psnr": 15.33,
+  "id": "DqIyKlJa-2s",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -23.55,
+  "cmyk_resid_db": -14.62,
+  "rgb_psnr": 15.37,
+  "cmyk_psnr": 15.34,
+  "id": "DqIyKlJa-2s",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -25.93,
+  "cmyk_resid_db": -15.11,
+  "rgb_psnr": 15.37,
+  "cmyk_psnr": 15.33,
+  "id": "DqIyKlJa-2s",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -3.78,
+  "cmyk_resid_db": -0.44,
+  "rgb_psnr": 15.65,
+  "cmyk_psnr": 15.64,
+  "id": "EPy0gBJzzZU",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -3.09,
+  "cmyk_resid_db": -0.34,
+  "rgb_psnr": 15.65,
+  "cmyk_psnr": 15.64,
+  "id": "EPy0gBJzzZU",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -10.81,
+  "cmyk_resid_db": -0.53,
+  "rgb_psnr": 15.67,
+  "cmyk_psnr": 15.65,
+  "id": "EPy0gBJzzZU",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -11.91,
+  "cmyk_resid_db": -0.48,
+  "rgb_psnr": 15.66,
+  "cmyk_psnr": 15.64,
+  "id": "EPy0gBJzzZU",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -4.71,
+  "cmyk_resid_db": -2.61,
+  "rgb_psnr": 15.47,
+  "cmyk_psnr": 15.46,
+  "id": "FvTn9Dlv39A",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -4.07,
+  "cmyk_resid_db": -2.41,
+  "rgb_psnr": 15.46,
+  "cmyk_psnr": 15.45,
+  "id": "FvTn9Dlv39A",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -10.8,
+  "cmyk_resid_db": -3.99,
+  "rgb_psnr": 15.59,
+  "cmyk_psnr": 15.56,
+  "id": "FvTn9Dlv39A",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -11.45,
+  "cmyk_resid_db": -3.97,
+  "rgb_psnr": 15.53,
+  "cmyk_psnr": 15.51,
+  "id": "FvTn9Dlv39A",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.67,
+  "cmyk_resid_db": -7.88,
+  "rgb_psnr": 14.64,
+  "cmyk_psnr": 14.63,
+  "id": "GRLN5FC4cLg",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -9.45,
+  "cmyk_resid_db": -8.02,
+  "rgb_psnr": 14.63,
+  "cmyk_psnr": 14.63,
+  "id": "GRLN5FC4cLg",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -17.32,
+  "cmyk_resid_db": -9.39,
+  "rgb_psnr": 14.64,
+  "cmyk_psnr": 14.64,
+  "id": "GRLN5FC4cLg",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -18.56,
+  "cmyk_resid_db": -9.45,
+  "rgb_psnr": 14.64,
+  "cmyk_psnr": 14.64,
+  "id": "GRLN5FC4cLg",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -2.78,
+  "cmyk_resid_db": -1.08,
+  "rgb_psnr": 16.02,
+  "cmyk_psnr": 16.0,
+  "id": "LVdiXyu2eTc",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -1.98,
+  "cmyk_resid_db": -0.65,
+  "rgb_psnr": 16.01,
+  "cmyk_psnr": 16.0,
+  "id": "LVdiXyu2eTc",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.61,
+  "cmyk_resid_db": -3.18,
+  "rgb_psnr": 16.04,
+  "cmyk_psnr": 16.02,
+  "id": "LVdiXyu2eTc",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -10.91,
+  "cmyk_resid_db": -3.37,
+  "rgb_psnr": 16.04,
+  "cmyk_psnr": 16.01,
+  "id": "LVdiXyu2eTc",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -3.13,
+  "cmyk_resid_db": -0.28,
+  "rgb_psnr": 16.17,
+  "cmyk_psnr": 16.16,
+  "id": "N6nnIx4C-Fo",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -2.39,
+  "cmyk_resid_db": -0.16,
+  "rgb_psnr": 16.16,
+  "cmyk_psnr": 16.16,
+  "id": "N6nnIx4C-Fo",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.97,
+  "cmyk_resid_db": -0.39,
+  "rgb_psnr": 16.18,
+  "cmyk_psnr": 16.16,
+  "id": "N6nnIx4C-Fo",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -11.05,
+  "cmyk_resid_db": -0.33,
+  "rgb_psnr": 16.17,
+  "cmyk_psnr": 16.16,
+  "id": "N6nnIx4C-Fo",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -10.88,
+  "cmyk_resid_db": -8.99,
+  "rgb_psnr": 16.88,
+  "cmyk_psnr": 16.87,
+  "id": "O6N9RV2rzX8",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -10.54,
+  "cmyk_resid_db": -8.9,
+  "rgb_psnr": 16.88,
+  "cmyk_psnr": 16.87,
+  "id": "O6N9RV2rzX8",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -18.74,
+  "cmyk_resid_db": -10.92,
+  "rgb_psnr": 16.91,
+  "cmyk_psnr": 16.89,
+  "id": "O6N9RV2rzX8",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -20.3,
+  "cmyk_resid_db": -11.03,
+  "rgb_psnr": 16.9,
+  "cmyk_psnr": 16.88,
+  "id": "O6N9RV2rzX8",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.29,
+  "cmyk_resid_db": -6.61,
+  "rgb_psnr": 15.43,
+  "cmyk_psnr": 15.43,
+  "id": "PP8Escz15d8",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -8.9,
+  "cmyk_resid_db": -6.7,
+  "rgb_psnr": 15.43,
+  "cmyk_psnr": 15.43,
+  "id": "PP8Escz15d8",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -16.88,
+  "cmyk_resid_db": -7.61,
+  "rgb_psnr": 15.46,
+  "cmyk_psnr": 15.45,
+  "id": "PP8Escz15d8",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -18.2,
+  "cmyk_resid_db": -7.66,
+  "rgb_psnr": 15.44,
+  "cmyk_psnr": 15.44,
+  "id": "PP8Escz15d8",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -4.58,
+  "cmyk_resid_db": -1.39,
+  "rgb_psnr": 16.85,
+  "cmyk_psnr": 16.84,
+  "id": "RMHF7BY3XXo",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -4.03,
+  "cmyk_resid_db": -1.28,
+  "rgb_psnr": 16.85,
+  "cmyk_psnr": 16.84,
+  "id": "RMHF7BY3XXo",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -12.5,
+  "cmyk_resid_db": -2.14,
+  "rgb_psnr": 16.86,
+  "cmyk_psnr": 16.85,
+  "id": "RMHF7BY3XXo",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -14.05,
+  "cmyk_resid_db": -2.17,
+  "rgb_psnr": 16.85,
+  "cmyk_psnr": 16.84,
+  "id": "RMHF7BY3XXo",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -5.07,
+  "cmyk_resid_db": -1.69,
+  "rgb_psnr": 15.74,
+  "cmyk_psnr": 15.73,
+  "id": "Vr-OPKxwXO0",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -4.46,
+  "cmyk_resid_db": -1.61,
+  "rgb_psnr": 15.73,
+  "cmyk_psnr": 15.73,
+  "id": "Vr-OPKxwXO0",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -11.96,
+  "cmyk_resid_db": -1.93,
+  "rgb_psnr": 15.75,
+  "cmyk_psnr": 15.73,
+  "id": "Vr-OPKxwXO0",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -13.14,
+  "cmyk_resid_db": -1.92,
+  "rgb_psnr": 15.74,
+  "cmyk_psnr": 15.73,
+  "id": "Vr-OPKxwXO0",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -6.45,
+  "cmyk_resid_db": -3.61,
+  "rgb_psnr": 15.6,
+  "cmyk_psnr": 15.59,
+  "id": "fY1ECB1RCd0",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -5.79,
+  "cmyk_resid_db": -3.47,
+  "rgb_psnr": 15.59,
+  "cmyk_psnr": 15.58,
+  "id": "fY1ECB1RCd0",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -13.13,
+  "cmyk_resid_db": -3.97,
+  "rgb_psnr": 15.65,
+  "cmyk_psnr": 15.62,
+  "id": "fY1ECB1RCd0",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -14.1,
+  "cmyk_resid_db": -3.92,
+  "rgb_psnr": 15.63,
+  "cmyk_psnr": 15.61,
+  "id": "fY1ECB1RCd0",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -4.15,
+  "cmyk_resid_db": -0.43,
+  "rgb_psnr": 14.8,
+  "cmyk_psnr": 14.8,
+  "id": "hmtD7tLRnws",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -3.5,
+  "cmyk_resid_db": -0.34,
+  "rgb_psnr": 14.8,
+  "cmyk_psnr": 14.79,
+  "id": "hmtD7tLRnws",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -10.89,
+  "cmyk_resid_db": -0.55,
+  "rgb_psnr": 14.81,
+  "cmyk_psnr": 14.8,
+  "id": "hmtD7tLRnws",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -11.85,
+  "cmyk_resid_db": -0.5,
+  "rgb_psnr": 14.81,
+  "cmyk_psnr": 14.8,
+  "id": "hmtD7tLRnws",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -12.03,
+  "cmyk_resid_db": -10.31,
+  "rgb_psnr": 15.67,
+  "cmyk_psnr": 15.67,
+  "id": "rTZW4f02zY8",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -12.37,
+  "cmyk_resid_db": -10.8,
+  "rgb_psnr": 15.67,
+  "cmyk_psnr": 15.67,
+  "id": "rTZW4f02zY8",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -20.37,
+  "cmyk_resid_db": -11.84,
+  "rgb_psnr": 15.68,
+  "cmyk_psnr": 15.67,
+  "id": "rTZW4f02zY8",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -21.82,
+  "cmyk_resid_db": -11.87,
+  "rgb_psnr": 15.68,
+  "cmyk_psnr": 15.67,
+  "id": "rTZW4f02zY8",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -3.82,
+  "cmyk_resid_db": -3.65,
+  "rgb_psnr": 13.75,
+  "cmyk_psnr": 13.74,
+  "id": "toPRrcyAIUY",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -3.14,
+  "cmyk_resid_db": -3.02,
+  "rgb_psnr": 13.67,
+  "cmyk_psnr": 13.65,
+  "id": "toPRrcyAIUY",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -12.68,
+  "cmyk_resid_db": -11.53,
+  "rgb_psnr": 14.2,
+  "cmyk_psnr": 14.17,
+  "id": "toPRrcyAIUY",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -14.77,
+  "cmyk_resid_db": -13.32,
+  "rgb_psnr": 14.2,
+  "cmyk_psnr": 14.18,
+  "id": "toPRrcyAIUY",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -5.09,
+  "cmyk_resid_db": -2.16,
+  "rgb_psnr": 16.54,
+  "cmyk_psnr": 16.53,
+  "id": "vddccTqwal8",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -4.41,
+  "cmyk_resid_db": -2.12,
+  "rgb_psnr": 16.54,
+  "cmyk_psnr": 16.53,
+  "id": "vddccTqwal8",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -11.99,
+  "cmyk_resid_db": -2.25,
+  "rgb_psnr": 16.55,
+  "cmyk_psnr": 16.53,
+  "id": "vddccTqwal8",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -13.12,
+  "cmyk_resid_db": -2.22,
+  "rgb_psnr": 16.54,
+  "cmyk_psnr": 16.53,
+  "id": "vddccTqwal8",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -2.81,
+  "cmyk_resid_db": -0.37,
+  "rgb_psnr": 16.75,
+  "cmyk_psnr": 16.74,
+  "id": "vngzm4P2BTs",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -2.09,
+  "cmyk_resid_db": -0.27,
+  "rgb_psnr": 16.74,
+  "cmyk_psnr": 16.74,
+  "id": "vngzm4P2BTs",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -9.13,
+  "cmyk_resid_db": -0.73,
+  "rgb_psnr": 16.75,
+  "cmyk_psnr": 16.74,
+  "id": "vngzm4P2BTs",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -10.11,
+  "cmyk_resid_db": -0.73,
+  "rgb_psnr": 16.75,
+  "cmyk_psnr": 16.74,
+  "id": "vngzm4P2BTs",
+  "d0": 10.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -5.68,
+  "cmyk_resid_db": -2.8,
+  "rgb_psnr": 16.31,
+  "cmyk_psnr": 16.3,
+  "id": "zjyP-UYI-ko",
+  "d0": 6.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -5.15,
+  "cmyk_resid_db": -2.81,
+  "rgb_psnr": 16.3,
+  "cmyk_psnr": 16.3,
+  "id": "zjyP-UYI-ko",
+  "d0": 6.0,
+  "order": 3
+ },
+ {
+  "rgb_resid_db": -13.25,
+  "cmyk_resid_db": -3.56,
+  "rgb_psnr": 16.35,
+  "cmyk_psnr": 16.33,
+  "id": "zjyP-UYI-ko",
+  "d0": 10.0,
+  "order": 2
+ },
+ {
+  "rgb_resid_db": -14.65,
+  "cmyk_resid_db": -3.61,
+  "rgb_psnr": 16.32,
+  "cmyk_psnr": 16.31,
+  "id": "zjyP-UYI-ko",
+  "d0": 10.0,
+  "order": 3
+ }
+]

@@ -37,11 +37,30 @@ class TrainConfig:
     fourier_w: float = 0.1
     lpips_w: float = 0.1
     ema_decay: float = 0.999
+    hard_boost: bool = False
+    warm_start: str = ""
 
 
 def psnr(pred: torch.Tensor, target: torch.Tensor) -> float:
     mse = torch.mean((pred - target) ** 2).item()
     return 10.0 * math.log10(1.0 / max(mse, 1e-12))
+
+
+def hard_weights(data_root: str | Path, ds: DescreenDataset, seed: int) -> torch.DoubleTensor:
+    man = [json.loads(l) for l in open(Path(data_root) / "train" / "manifest.jsonl", encoding="utf-8")]
+    by_id = {r["id"]: r for r in man}
+    w = []
+    for p in ds.scans:
+        r = by_id[p.stem]
+        x = 1.0
+        if r["preset"] == "newspaper":
+            x *= 2.0
+        if r["kind"] == "photo+headline":
+            x *= 2.0
+        if r["scan_dpi"] == 300:
+            x *= 1.5
+        w.append(x)
+    return torch.DoubleTensor(w)
 
 
 def save_ckpt(path: Path, model: torch.nn.Module, opt: torch.optim.Optimizer, epoch: int, best: float, ema: dict | None = None) -> None:
@@ -81,7 +100,14 @@ def train(cfg: TrainConfig) -> dict:
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=1), encoding="utf-8")
     train_ds = DescreenDataset(cfg.data, "train")
     val_ds = DescreenDataset(cfg.data, "val")
-    train_dl = DataLoader(train_ds, batch_size=cfg.batch, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
+    if cfg.hard_boost:
+        sampler = torch.utils.data.WeightedRandomSampler(
+            hard_weights(cfg.data, train_ds, cfg.seed), len(train_ds), replacement=True,
+            generator=torch.Generator().manual_seed(cfg.seed),
+        )
+        train_dl = DataLoader(train_ds, batch_size=cfg.batch, sampler=sampler, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
+    else:
+        train_dl = DataLoader(train_ds, batch_size=cfg.batch, shuffle=True, num_workers=cfg.num_workers, pin_memory=True, drop_last=True)
     val_dl = DataLoader(val_ds, batch_size=1, shuffle=False, num_workers=cfg.num_workers, pin_memory=True)
     model = FourierUNet(
         base=cfg.arch_base,
@@ -92,6 +118,11 @@ def train(cfg: TrainConfig) -> dict:
         spectral=tuple([cfg.arch_spectral_l0] + [True] * (cfg.arch_levels - 1)),
     ).cuda()
     ema = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    if cfg.warm_start:
+        w = torch.load(cfg.warm_start, map_location="cpu", weights_only=False)
+        model.load_state_dict(w["model"] if "model" in w else w)
+        ema = {k: v.detach().clone() for k, v in model.state_dict().items()}
+        print(f"warm start from {cfg.warm_start}", flush=True)
     loss_fn = CompositeLoss(LossConfig(w_fourier=cfg.fourier_w, w_lpips=cfg.lpips_w)).cuda()
     opt = torch.optim.Adam(model.parameters(), lr=cfg.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=cfg.epochs * len(train_dl))
@@ -114,7 +145,7 @@ def train(cfg: TrainConfig) -> dict:
     for epoch in range(start_epoch, cfg.epochs):
         model.train()
         tot, n = 0.0, 0
-        for xs, ys in train_dl:
+        for xs, ys, _ in train_dl:
             xs, ys = xs.cuda(non_blocking=True), ys.cuda(non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.amp.autocast("cuda", enabled=cfg.amp):
@@ -138,7 +169,7 @@ def train(cfg: TrainConfig) -> dict:
             backup = load_ema(model, {k: v.cuda() for k, v in ema.items()})
             ps, ss, nv = 0.0, 0.0, 0
             with torch.no_grad():
-                for xs, ys in val_dl:
+                for xs, ys, _ in val_dl:
                     if nv >= cfg.val_max:
                         break
                     xs, ys = xs.cuda(non_blocking=True), ys.cuda(non_blocking=True)
@@ -183,6 +214,8 @@ def main() -> None:
     ap.add_argument("--fourier-w", type=float, default=0.1)
     ap.add_argument("--lpips-w", type=float, default=0.1)
     ap.add_argument("--ema-decay", type=float, default=0.999)
+    ap.add_argument("--hard-boost", type=int, default=0)
+    ap.add_argument("--warm-start", type=str, default="")
     args = ap.parse_args()
     cfg = TrainConfig(
         epochs=args.epochs,
@@ -197,6 +230,8 @@ def main() -> None:
         fourier_w=args.fourier_w,
         lpips_w=args.lpips_w,
         ema_decay=args.ema_decay,
+        hard_boost=bool(args.hard_boost),
+        warm_start=args.warm_start,
     )
     print(train(cfg), flush=True)
 

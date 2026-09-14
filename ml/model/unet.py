@@ -61,7 +61,7 @@ class FourierUNet(nn.Module):
         )
         self.outc = nn.Conv2d(base, out_channels, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         feats = []
         e = torch.nn.functional.gelu(self.inc(x))
         for enc, down in zip(self.encs, self.downs):
@@ -73,7 +73,17 @@ class FourierUNet(nn.Module):
         for up, dec, skip in zip(self.ups, self.decs, reversed(feats)):
             d = dec(up(d) + skip)
         residual = self.outc(d)
-        return torch.clamp(x - residual, 0.0, 1.0)
+        out = torch.clamp(x - residual, 0.0, 1.0)
+        if return_features:
+            return out, b
+        return out
+
+    def bottleneck_features(self, x: torch.Tensor) -> torch.Tensor:
+        e = torch.nn.functional.gelu(self.inc(x))
+        for enc, down in zip(self.encs, self.downs):
+            e = enc(e)
+            e = down(e)
+        return self.bottleneck(e)
 
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())

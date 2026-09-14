@@ -19,8 +19,8 @@ class DescreenDataset(Dataset):
     def __len__(self) -> int:
         return len(self.scans)
 
-    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def __getitem__(self, i: int) -> tuple[torch.Tensor, torch.Tensor, str]:
         scan = np.asarray(Image.open(self.scans[i]).convert("RGB"), dtype=np.float32) / 255.0
         gt = np.asarray(Image.open(self.gts[i]).convert("RGB"), dtype=np.float32) / 255.0
         to_t = lambda a: torch.from_numpy(a).permute(2, 0, 1)
-        return to_t(scan), to_t(gt)
+        return to_t(scan), to_t(gt), self.scans[i].stem
