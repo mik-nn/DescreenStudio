@@ -10,6 +10,7 @@ import torch
 from onnxconverter_common import float16
 
 from ml.model import FourierUNet
+from torch.export import Dim as _Dim
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -23,18 +24,35 @@ def build_champion(device: str = "cpu") -> FourierUNet:
     return m.eval().to(device)
 
 
-def export(out: Path, opset: int = 17) -> Path:
+def fix_inverse_dft(model: onnx.ModelProto) -> int:
+    fixed = 0
+    for n in model.graph.node:
+        if n.op_type != "DFT":
+            continue
+        attrs = {a.name: a for a in n.attribute}
+        inv, one = attrs.get("inverse"), attrs.get("onesided")
+        if inv and int(inv.i) == 1 and one and int(one.i) == 1:
+            one.i = 0
+            fixed += 1
+    return fixed
+
+
+def export(out: Path, opset: int = 18) -> Path:
     m = build_champion("cpu")
     dummy = torch.rand(1, 3, 512, 512)
+    hdim = _Dim("height", min=16, max=16384)
+    wdim = _Dim("width", min=16, max=16384)
+    dynamic_shapes = [{0: None, 2: hdim, 3: wdim}]
     torch.onnx.export(
-        m, dummy, str(out), export_params=True, opset_version=opset,
+        m, dummy, str(out), dynamo=True, export_params=True, opset_version=opset,
         do_constant_folding=True, input_names=["input"], output_names=["output"],
-        dynamic_axes={"input": {0: "batch", 2: "height", 3: "width"},
-                      "output": {0: "batch", 2: "height", 3: "width"}},
+        dynamic_shapes=dynamic_shapes,
     )
     model = onnx.load(str(out))
+    fixed = fix_inverse_dft(model)
+    onnx.checker.check_model(model)
     onnx.save(model, str(out))
-    print("exported fp32:", out, round(out.stat().st_size / 1e6, 1), "MB")
+    print(f"exported fp32: {out} {out.stat().st_size / 1e6:.1f} MB (inverse-DFT fixed: {fixed})")
     return out
 
 
@@ -69,14 +87,15 @@ def verify(path: Path, providers: list[str], sizes: tuple[int, ...] = (512, 256)
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="ml/export/fourier_descreen_unet.onnx")
+    ap.add_argument("--fp16", action="store_true", help="also emit half-precision artifact")
     args = ap.parse_args()
     out = ROOT / args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     fp32 = export(out)
     print("verify fp32/cpu:", verify(fp32, ["CPUExecutionProvider"], (512,)))
-    print("verify fp32/cuda:", verify(fp32, ["CUDAExecutionProvider", "CPUExecutionProvider"], (512,)))
-    fp16 = to_fp16(fp32, out.with_suffix(".fp16.onnx"))
-    print("verify fp16/cuda:", verify(fp16, ["CUDAExecutionProvider", "CPUExecutionProvider"]))
+    if args.fp16:
+        fp16 = to_fp16(fp32, out.with_suffix(".fp16.onnx"))
+        print("verify fp16/cuda:", verify(fp16, ["CUDAExecutionProvider", "CPUExecutionProvider"]))
 
 
 if __name__ == "__main__":
