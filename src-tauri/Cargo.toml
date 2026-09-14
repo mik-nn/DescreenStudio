@@ -1,0 +1,18 @@
+[package]
+name = "descreen-studio"
+version = "0.4.0"
+edition = "2021"
+description = "Descreen Studio Pro - neural halftone removal backend (ORT / DirectML + tiled Hann overlap-add)"
+
+[dependencies]
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"] }
+ndarray = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Build-time copy of onnxruntime.dll / DirectML.dll (see scripts/fetch_ort_dll.ps1)
+[[bin]]
+name = "descreen_bench"
+path = "src/main.rs"

@@ -10,3 +10,7 @@ ml/export/
 ml/analysis/_plates/
 ml/analysis/*.log
 ml/export.log
+src-tauri/target/
+src-tauri/deps/
+src-tauri/model*.onnx
+src-tauri/model.onnx
