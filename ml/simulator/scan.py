@@ -14,7 +14,24 @@ def sample_scan_params(cfg: ScanConfig, rng: np.random.Generator) -> dict:
         "poisson_peak": float(rng.uniform(cfg.poisson_peak_min, cfg.poisson_peak_max)),
         "dust_lines": int(rng.integers(0, cfg.dust_lines_max + 1)),
         "dust_dots": int(rng.integers(0, cfg.dust_dots_max + 1)),
+        "band_lpi": float(rng.uniform(cfg.band_lpi_min, cfg.band_lpi_max)),
+        "band_amp": float(rng.uniform(cfg.band_amp_min, cfg.band_amp_max)),
+        "band_axis": int(rng.integers(0, 2)),  # 0: vary along x, 1: vary along y
+        "band_phase": float(rng.uniform(0.0, 2.0 * np.pi)),
+        "show_alpha": 0.0,  # set by caller when a ghost (back side) is provided
     }
+
+
+def _apply_banding(scan: np.ndarray, scan_dpi: int, params: dict) -> np.ndarray:
+    amp = params["band_amp"]
+    if amp <= 0:
+        return scan
+    h, w, _ = scan.shape
+    period = scan_dpi / max(params["band_lpi"], 1e-6)
+    coord = np.arange(w, dtype=np.float32) if params["band_axis"] == 0 else np.arange(h, dtype=np.float32)
+    wave = 1.0 + amp * np.sin(2.0 * np.pi * coord / period + params["band_phase"])
+    mult = wave[None, :, None] if params["band_axis"] == 0 else wave[:, None, None]
+    return (scan * mult).astype(np.float32)
 
 
 def rotate_rgb(img: np.ndarray, angle_deg: float) -> np.ndarray:
@@ -44,8 +61,14 @@ def _add_dust(img: np.ndarray, n_lines: int, n_dots: int, rng: np.random.Generat
 
 
 def simulate_scan(
-    print_img: np.ndarray, pcfg: PrintConfig, scfg: ScanConfig, params: dict | None = None
+    print_img: np.ndarray,
+    pcfg: PrintConfig,
+    scfg: ScanConfig,
+    params: dict | None = None,
+    ghost: np.ndarray | None = None,
 ) -> tuple[np.ndarray, dict]:
+    """Scan cascade. `ghost` (same HxW as the downsampled scan) is the duplex
+    back side, blended at params['show_alpha'] before noise."""
     rng = np.random.default_rng(scfg.seed)
     if params is None:
         params = sample_scan_params(scfg, rng)
@@ -60,6 +83,11 @@ def simulate_scan(
         rotated = gaussian_filter(rotated, sigma=(params["psf_sigma"] * s, params["psf_sigma"] * s, 0)).astype(np.float32)
     im = Image.fromarray((np.clip(rotated, 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8))
     scan = np.asarray(im.resize((wp // s, hp // s), Image.BOX), dtype=np.float32) / 255.0
+    alpha = float(params.get("show_alpha", 0.0))
+    if ghost is not None and alpha > 0:
+        g = np.clip(np.asarray(ghost, dtype=np.float32), 0.0, 1.0)
+        scan = np.clip(scan * (1.0 - alpha) + g * alpha, 0.0, 1.0).astype(np.float32)
+    scan = _apply_banding(scan, pcfg.scan_dpi, params)
     scan = scan + rng.normal(0.0, params["gauss_sigma"], scan.shape).astype(np.float32)
     peak = params["poisson_peak"]
     scan = rng.poisson(np.clip(scan, 0.0, 1.0) * peak).astype(np.float32) / peak

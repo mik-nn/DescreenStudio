@@ -6,7 +6,13 @@ from typing import Mapping
 
 CHANNELS: tuple[str, ...] = ("c", "m", "y", "k")
 
-STANDARD_ANGLES_DEG: dict[str, float] = {"c": 15.0, "m": 75.0, "y": 0.0, "k": 45.0}
+STANDARD_ANGLES_DEG: dict[str, float] = {
+    "c": 15.0,
+    "m": 75.0,
+    "y": 0.0,
+    "k": 45.0,
+    "s": 75.0,  # spot gray plate for duotone jobs
+}
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,10 @@ class PrintConfig:
     tvi_gain: float = 0.6
     optical_blur_sigma: float = 0.6
     paper_texture: float = 0.06
+    paper_tint: tuple[float, float, float] = (1.0, 1.0, 1.0)  # aged-paper RGB multiplier
+    ink_set: str = "cmyk"  # cmyk | k (mono) | duotone (k + spot gray)
+    icc_profile: str | None = None  # ECI profile filename under ml/simulator/icc/
+    icc_intent: int = 0  # ImageCms Intent.PERCEPTUAL
     chunk_rows: int = 512
     seed: int = 0
 
@@ -42,10 +52,35 @@ class PrintConfig:
         return replace(self, scan_dpi=scan_dpi, oversample=self.print_dpi // scan_dpi)
 
 
+PRESET_ICC: dict[str, str] = {
+    # Context-appropriate ECI offset profiles (see ml/simulator/icc/manifest.json).
+    # Uncoated extras (PSO_Uncoated_ISO12647, ISOuncoatedyellowish) available
+    # for explicit icc_profile overrides.
+    "newspaper": "PSO_SNP_Paper_eci.icc",
+    "magazine": "ISOcoated_v2_eci.icc",
+    "fine": "ISOcoated_v2_eci.icc",
+}
+
+
 PRESETS: dict[str, dict] = {
-    "newspaper": {"lpi": 95.0, "tvi_gain": 0.9, "optical_blur_sigma": 0.8},
-    "magazine": {"lpi": 133.0, "tvi_gain": 0.6, "optical_blur_sigma": 0.6},
-    "fine": {"lpi": 165.0, "tvi_gain": 0.45, "optical_blur_sigma": 0.5},
+    "newspaper": {
+        "lpi": 95.0,
+        "tvi_gain": 0.9,
+        "optical_blur_sigma": 0.8,
+        "icc_profile": PRESET_ICC["newspaper"],
+    },
+    "magazine": {
+        "lpi": 133.0,
+        "tvi_gain": 0.6,
+        "optical_blur_sigma": 0.6,
+        "icc_profile": PRESET_ICC["magazine"],
+    },
+    "fine": {
+        "lpi": 165.0,
+        "tvi_gain": 0.45,
+        "optical_blur_sigma": 0.5,
+        "icc_profile": PRESET_ICC["fine"],
+    },
 }
 
 
@@ -69,6 +104,12 @@ class ScanConfig:
     poisson_peak_max: float = 120.0
     dust_lines_max: int = 3
     dust_dots_max: int = 30
+    band_lpi_min: float = 6.0  # paper/scanner axial banding (measured r~0.01)
+    band_lpi_max: float = 10.0
+    band_amp_min: float = 0.0
+    band_amp_max: float = 0.02
+    show_alpha_min: float = 0.005  # duplex show-through strength
+    show_alpha_max: float = 0.04
     seed: int = 0
 
     def with_overrides(self, **kwargs: object) -> ScanConfig:

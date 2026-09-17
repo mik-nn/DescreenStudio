@@ -1,0 +1,32 @@
+{
+ "source": "https://eci.org/lib/exe/eci_offset_2009.zip (ECI Offset 2009, 2009-05-29)",
+ "fetched": "2026-09-14",
+ "license": "ECI free download; profiles embedded/used by the simulator, see eci.org terms",
+ "preset_map": {
+  "magazine": "ISOcoated_v2_eci.icc",
+  "fine": "ISOcoated_v2_eci.icc",
+  "newspaper": "PSO_SNP_Paper_eci.icc"
+ },
+ "uncoated_extra": [
+  "PSO_Uncoated_ISO12647_eci.icc",
+  "ISOuncoatedyellowish.icc"
+ ],
+ "files": {
+  "ISOcoated_v2_eci.icc": {
+   "bytes": 1829077,
+   "sha256": "128dc02f7246cc3807af0323695379f64151a8f27a587736acc59f8b6ce894b8"
+  },
+  "PSO_Uncoated_ISO12647_eci.icc": {
+   "bytes": 1829420,
+   "sha256": "e170a59fbf26e7845c62b07e95901b1ef3335a664c03e7ef48ddb84fa08337be"
+  },
+  "ISOuncoatedyellowish.icc": {
+   "bytes": 1527396,
+   "sha256": "1da8611a83588453251ce6486d82ed08374e749fb04953301d3beea9b130bea8"
+  },
+  "PSO_SNP_Paper_eci.icc": {
+   "bytes": 1829380,
+   "sha256": "49678565e9653b800d044f5bc596e279729410c00dbed4abc8ab0e6d4716af0a"
+  }
+ }
+}

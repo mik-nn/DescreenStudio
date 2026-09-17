@@ -73,7 +73,8 @@ class FourierUNet(nn.Module):
         for up, dec, skip in zip(self.ups, self.decs, reversed(feats)):
             d = dec(up(d) + skip)
         residual = self.outc(d)
-        out = torch.clamp(x - residual, 0.0, 1.0)
+        base = x[:, :3] if x.shape[1] > 3 else x
+        out = torch.clamp(base - residual, 0.0, 1.0)
         if return_features:
             return out, b
         return out

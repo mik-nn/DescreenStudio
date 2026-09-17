@@ -8,7 +8,7 @@ from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from ml.simulator.color import rgb_to_cmyk  # noqa: F401 (keeps package import warm in workers)
 from ml.simulator.compose import simulate_print
@@ -21,7 +21,9 @@ GT_DOCS = ROOT / "Data" / "gt" / "documents"
 PATCH = 512
 
 PRESET_WEIGHTS = [("magazine", 0.5), ("newspaper", 0.25), ("fine", 0.25)]
-LPI_RANGE = {"magazine": (120.0, 150.0), "newspaper": (85.0, 100.0), "fine": (150.0, 175.0)}
+LPI_RANGE = {"magazine": (120.0, 160.0), "newspaper": (75.0, 100.0), "fine": (150.0, 190.0)}
+INK_WEIGHTS = [("cmyk", 0.8), ("k", 0.1), ("duotone", 0.1)]
+SHOWTHROUGH_PROB = 0.15
 PHOTO_PROB = 0.65
 MIXED_PROB = 0.20
 DPI_CHOICES = [(300, 0.6), (600, 0.4)]
@@ -87,6 +89,24 @@ def gt_top_peak(gt: np.ndarray) -> float:
     return round(float(mag.max() / (mag.mean() + 1e-9)), 1)
 
 
+def sample_paper_tint(rng: random.Random) -> tuple[float, float, float]:
+    """Mostly white paper, sometimes aged/yellowed (old books)."""
+
+    def ch(low: float, p_white: float) -> float:
+        return 1.0 if rng.random() < p_white else round(rng.uniform(low, 1.0), 3)
+
+    return (ch(0.94, 0.7), ch(0.94, 0.7), ch(0.85, 0.5))
+
+
+def _scan_params_with_alpha(scfg: ScanConfig, seed: int, show_alpha: float) -> dict:
+    """Reproduce simulate_scan's default sampling, then inject show-through alpha."""
+    from ml.simulator.scan import sample_scan_params as _sample
+
+    params = _sample(scfg, np.random.default_rng(seed))
+    params["show_alpha"] = show_alpha
+    return params
+
+
 def make_patch(spec: dict, out_dirs: tuple[Path, Path]) -> dict:
     rng = random.Random(spec["seed"])
     img = load_source(spec["kind"], spec["file"], spec["scan_dpi"])
@@ -98,11 +118,36 @@ def make_patch(spec: dict, out_dirs: tuple[Path, Path]) -> dict:
     if mixed:
         gt = overlay_headline(gt, rng)
     lpi = rng.uniform(*LPI_RANGE[spec["preset"]])
-    pcfg = preset(spec["preset"], seed=spec["print_seed"]).with_overrides(lpi=lpi)
+    tint = sample_paper_tint(rng)
+    pcfg = preset(spec["preset"], seed=spec["print_seed"]).with_overrides(
+        lpi=lpi, ink_set=spec["ink_set"], paper_tint=tint
+    )
     pcfg = pcfg.for_scan_dpi(spec["scan_dpi"])
     scfg = ScanConfig(seed=spec["scan_seed"])
     printed = simulate_print(gt, pcfg)
-    scan, sparams = simulate_scan(printed, pcfg, scfg)
+    ghost_src: str | None = None
+    show_alpha = 0.0
+    if rng.random() < SHOWTHROUGH_PROB:
+        gx = rng.randint(0, w - PATCH)
+        gy = rng.randint(0, h - PATCH)
+        ghost = img[gy : gy + PATCH, gx : gx + PATCH][:, ::-1]
+        ghost = np.asarray(
+            Image.fromarray((ghost * 255 + 0.5).astype(np.uint8)).filter(
+                ImageFilter.GaussianBlur(2.0)
+            ),
+            dtype=np.float32,
+        ) / 255.0
+        show_alpha = round(rng.uniform(scfg.show_alpha_min, scfg.show_alpha_max), 4)
+        ghost_src = f"{Path(spec['file']).name}@{gx},{gy}"
+    else:
+        ghost = None
+    scan, sparams = simulate_scan(
+        printed,
+        pcfg,
+        scfg,
+        params=_scan_params_with_alpha(scfg, spec["scan_seed"], show_alpha),
+        ghost=ghost,
+    )
     gt_aligned = rotate_rgb(gt, sparams["angle"])
     pid = spec["id"]
     scan_dir, gt_dir = out_dirs
@@ -116,6 +161,9 @@ def make_patch(spec: dict, out_dirs: tuple[Path, Path]) -> dict:
         "scan_dpi": spec["scan_dpi"],
         "preset": spec["preset"],
         "lpi": round(lpi, 2),
+        "ink_set": spec["ink_set"],
+        "paper_tint": [round(float(v), 3) for v in pcfg.paper_tint],
+        "ghost_src": ghost_src,
         "print_seed": spec["print_seed"],
         "scan_seed": spec["scan_seed"],
         "scan_params": {k: (round(float(v), 4) if isinstance(v, float) else v) for k, v in sparams.items()},
@@ -136,6 +184,7 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
                 "file": rng.choice(pool),
                 "scan_dpi": pick_weighted(rng, DPI_CHOICES),
                 "preset": pick_weighted(rng, PRESET_WEIGHTS),
+                "ink_set": pick_weighted(rng, INK_WEIGHTS),
                 "seed": rng.randint(0, 2**31 - 1),
                 "print_seed": rng.randint(0, 2**31 - 1),
                 "scan_seed": rng.randint(0, 2**31 - 1),
@@ -144,8 +193,8 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
     return plan
 
 
-def run_split(name: str, n: int, photos: list[str], docs: list[str], seed: int, workers: int) -> None:
-    out = ROOT / "Data" / "synth" / name
+def run_split(root: Path, name: str, n: int, photos: list[str], docs: list[str], seed: int, workers: int) -> None:
+    out = root / name
     scan_dir, gt_dir = out / "scan", out / "gt"
     scan_dir.mkdir(parents=True, exist_ok=True)
     gt_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +222,7 @@ def run_split(name: str, n: int, photos: list[str], docs: list[str], seed: int, 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--root", default="Data/synth")
     ap.add_argument("--train", type=int, default=10000)
     ap.add_argument("--val", type=int, default=1000)
     ap.add_argument("--seed", type=int, default=11)
@@ -180,13 +230,14 @@ def main() -> None:
     ap.add_argument("--val-photos", type=int, default=200)
     ap.add_argument("--val-docs", type=int, default=50)
     args = ap.parse_args()
+    root = Path(args.root)
     photos = sorted(str(p) for p in GT_PHOTOS.glob("*.jpg"))
     docs = sorted(str(p) for p in GT_DOCS.glob("*.png"))
     assert len(photos) > args.val_photos and len(docs) > args.val_docs
     train_photos, val_photos = photos[:- args.val_photos], photos[-args.val_photos :]
     train_docs, val_docs = docs[:- args.val_docs], docs[-args.val_docs :]
-    run_split("train", args.train, train_photos, train_docs, args.seed, args.workers)
-    run_split("val", args.val, val_photos, val_docs, args.seed + 1, args.workers)
+    run_split(root, "train", args.train, train_photos, train_docs, args.seed, args.workers)
+    run_split(root, "val", args.val, val_photos, val_docs, args.seed + 1, args.workers)
     summary = {
         "train": args.train,
         "val": args.val,
@@ -195,7 +246,7 @@ def main() -> None:
         "presets": PRESET_WEIGHTS,
         "dpi": DPI_CHOICES,
     }
-    (ROOT / "Data" / "synth" / "dataset.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    (root / "dataset.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
 
 
 if __name__ == "__main__":

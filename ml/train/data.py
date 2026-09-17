@@ -9,12 +9,13 @@ from torch.utils.data import Dataset
 
 
 class DescreenDataset(Dataset):
-    def __init__(self, root: str | Path, split: str = "train"):
+    def __init__(self, root: str | Path, split: str = "train", extra_dct: bool = False):
         d = Path(root) / split
         self.scans = sorted((d / "scan").glob("*.png"))
         self.gts = sorted((d / "gt").glob("*.png"))
         assert len(self.scans) == len(self.gts) and len(self.scans) > 0
         assert all(s.stem == g.stem for s, g in zip(self.scans, self.gts))
+        self.extra_dct = extra_dct
 
     def __len__(self) -> int:
         return len(self.scans)
@@ -23,4 +24,10 @@ class DescreenDataset(Dataset):
         scan = np.asarray(Image.open(self.scans[i]).convert("RGB"), dtype=np.float32) / 255.0
         gt = np.asarray(Image.open(self.gts[i]).convert("RGB"), dtype=np.float32) / 255.0
         to_t = lambda a: torch.from_numpy(a).permute(2, 0, 1)
+        if self.extra_dct:
+            from ml.train.dctfeat import dct_channels
+
+            lum = (0.299 * scan[:, :, 0] + 0.587 * scan[:, :, 1] + 0.114 * scan[:, :, 2]).astype(np.float32)
+            feat = dct_channels(lum)
+            scan = np.concatenate([scan, feat], axis=-1)
         return to_t(scan), to_t(gt), self.scans[i].stem
