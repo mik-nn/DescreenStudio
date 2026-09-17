@@ -3,6 +3,7 @@ ml/train/_*/
 ml/train/search.db
 ml/train/*.log
 ml/simulator/_*/
+ml/simulator/icc/*.icc
 __pycache__/
 *.pyc
 *.pt
@@ -12,5 +13,8 @@ ml/analysis/*.log
 ml/export.log
 src-tauri/target/
 src-tauri/deps/
+src-tauri/gen/
 src-tauri/model*.onnx
 src-tauri/model.onnx
+src/node_modules/
+src/dist/
