@@ -2,17 +2,31 @@
 name = "descreen-studio"
 version = "0.4.0"
 edition = "2021"
+default-run = "descreen-studio"
 description = "Descreen Studio Pro - neural halftone removal backend (ORT / DirectML + tiled Hann overlap-add)"
+
+[lib]
+name = "descreen_studio"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"] }
 ndarray = "0.17"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = "0.25"
+rustfft = "6.2"
+base64 = "0.22"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [profile.release]
 opt-level = 3
 lto = "thin"
 
-# Build-time copy of onnxruntime.dll / DirectML.dll (see scripts/fetch_ort_dll.ps1)
 [[bin]]
 name = "descreen_bench"
-path = "src/main.rs"
+path = "src/bin/descreen_bench.rs"
