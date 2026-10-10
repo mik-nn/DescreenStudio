@@ -117,9 +117,13 @@ def detect_peaks(
 
 
 def estimate_raster(gray: np.ndarray, cfg: SpectrumConfig) -> RasterEstimate:
-    """Single-ROI raster estimate with sqrt(2) harmonic check."""
-    n = cfg.measure_roi
+    """Single-ROI raster estimate with sqrt(2) harmonic check.
+
+    ROI клэмпится к размерам кадра (Nyquist-даунсэмплы ниже 1024 по
+    высоте, 2026-10-10) — как в Rust build_notch_lists.
+    """
     h, w = gray.shape
+    n = min(cfg.measure_roi, h, w)
     y = max(0, h // 2 - n // 2)
     x = max(0, w // 2 - n // 2)
     roi = gray[y : y + n, x : x + n]

@@ -125,7 +125,9 @@ def residual_quad_max(gray: np.ndarray, s: int = 512, var_min: float = 1e-6) -> 
             continue  # пустое поле — пики там мусорные (урок Calendar2/Offset4)
         f = np.fft.fftshift(np.fft.fft2(roi - roi.mean()))
         mag = np.abs(f)
-        _, _, r = _freq_grids(s0)
+        # span среза = 2*floor(s0/2): при нечётном s0 roi на 1px меньше
+        nq = roi.shape[0]
+        _, _, r = _freq_grids(nq)
         m = mag.copy()
         m[r < 0.05] = 0.0
         vals.append(float(m.max() / (mag.mean() + 1e-12)))
