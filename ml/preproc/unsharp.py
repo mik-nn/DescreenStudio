@@ -22,7 +22,9 @@ from ml.preproc.spectrum import SpectrumConfig
 
 SHARP_TARGET = 1.0
 SHARP_TOL = 0.05
-AMOUNT_MAX = 1.5
+# 2026-10-10: 1.5 (кап 2026-09-21) упирался на M(2) run27 (sharp 0.80 при
+# amount=1.50; top4/flatHF при этом УЛУЧШАЛИСЬ) — потолок поднят до 2.2.
+AMOUNT_MAX = 2.2
 AMOUNT_STEP = 1.4
 SIGMA = 1.0
 
@@ -36,13 +38,13 @@ def unsharp(img: np.ndarray, amount: float, sigma: float = SIGMA) -> np.ndarray:
 
 def adaptive_unsharp(img: np.ndarray, src: np.ndarray, cfg: SpectrumConfig,
                      target: float = SHARP_TARGET) -> tuple[np.ndarray, float, float]:
-    """Возвращает (out, amount, sharp_ratio). Максимум 6 итераций оценки."""
+    """Возвращает (out, amount, sharp_ratio). Максимум 8 итераций оценки."""
     rep0 = evaluate(src, img, cfg)
     if rep0.sharp_ratio >= target - SHARP_TOL:
         return img, 0.0, rep0.sharp_ratio
     amount = 0.5
     best, best_d = img, abs(rep0.sharp_ratio - target)
-    for _ in range(6):
+    for _ in range(8):
         out = unsharp(img, amount)
         rep = evaluate(src, out, cfg)
         d = abs(rep.sharp_ratio - target)

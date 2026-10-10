@@ -2,7 +2,7 @@
 
 Статусы и правила — см. `WORKFLOW.md`. Нумерация этапов соответствует `ImplementationPlan.md`.
 
-**Текущий фокус:** **run27_hyb — ЭТАЛОН** + gated backoff (2.25, включая порт в Rust 2.25б): панель 11 vs run10 — top4 **−14.8%**, resid **−19.0%**. Дальше: 2.26 sharp-восстановление Pack/M(2).
+**Текущий фокус:** **run27_hyb — ЭТАЛОН** + gated backoff (2.25, включая порт в Rust 2.25б) + adaptive_unsharp в приёмке (2.26): панель 11 vs run10 — top4 **−14.8%**, resid **−19.0%**, sharp в коридоре. Дальше: BookCOver sharp-хвост (0.43) или Этап 3 (экспорт ONNX эталона).
 
 ## Этап 1. Dataset Pipeline
 
@@ -83,5 +83,5 @@
   - **run27 — DONE, ЭТАЛОН (2026-10-10, панель 11 в JOURNAL):** гибрид `_run27_hyb` (prefiltered 28k, warm H1, 3 эпохи, lpips 0.05). val 31.21/0.8911/tone 32.92. Панель 11 vs run10: top4 **−13.2%**, resid **−17.1%** (Calendar1 −32%, BookCOver −20%, Offset1 −19%); sharp смешанная (выше на Offset1/Offset2, ниже на Pack/1821146u), коллапса нет. Артефакты: `Data/RealScan/_eval_run27_panel11/`, `Temp/cmp_*_run27.png`.
   - **2.25 FiLM-backoff — DONE (2026-10-10, JOURNAL):** FiLM-cond отклонён (zero-cond run27: 182→184.6 — cond ни при чём), блочный flat-backoff отклонён (22/256 блоков, 182→181 — пик когерентен глобально), **принят gated scalar backoff** (`ml/preproc/backoff.py` + `--backoff-mode gated --backoff-w 0.5 --backoff-gate 0.25` в eval_realscan): сработал только на 1821146u — top4 182.1→112.6 (ниже префильтра), dE 3.86 (лучше run10 и префильтра), выдуманные пики 0.2109/0.1485 убраны; остальные 10 сканов не тронуты. Итог панели vs run10: **top4 −14.8%, resid −19.0%**. Риск: гейт таргетит ту же метрику (запас кейсов ×2.5: 1.08 vs 1.60).
   - **2.25б порт gated-backoff в Rust-цепочку — DONE (2026-10-10, JOURNAL):** `top4_peak_sum` (паритет с `residual_peaks_multi`: ROI 1024, диск+зеркало) + поля `backoff_*` в `PrefilterCfg`, хвост `descreen_file` — замыкание `finish(net, k)`, гейт по top4(final) vs top4(pre)×1.25. Тест `top4_flags_grating_and_notch_drops_it`, cargo test 8/8 (по пути: `spectral_block_impl.rs` перенесён из `src/bin/` в `src/inc/` — ломал сборку тестов). Прогон `--chain`: 1821146u **fired** 192.6→122.1 (pre 114.3; Python 182.1→112.4), book1 **не сработал** (103.6 < 125.6) — паритет поведения подтверждён.
-  - **2.26 sharp-восстановление Pack/M(2) — TODO** (run27: 0.60/0.24 против run10 1.74/0.50).
+  - **2.26 sharp-восстановление Pack/M(2) — DONE (2026-10-10, JOURNAL):** включён `adaptive_unsharp` в приёмку панели + кап `AMOUNT_MAX` 1.5→2.2 (M(2) упирался в потолок). Pack 0.60→**0.94** (resid 269.6→255.0 — улучшается), M(2) 0.24→**1.11** (resid 194.4). Панель 11 с прод-рецептом (+unsharp, gated backoff): `Data/RealScan/_eval_run27u_panel11/` — 1821146u backoff воспроизошёл (top4 112.6), resid лучше run10 на 8/11. Остаток: BookCOver sharp 0.43 (hard case), over-sharp Offset1/Offset2 (amt=0, собственность сети).
 - Оценить целесообразность собственных контрольных сканов печатных мишеней (после Этапа 2, если качество на реальных сканах недостаточно).
