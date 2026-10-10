@@ -1,0 +1,42 @@
+# Конфигурация сборки Cargo для Descreen Studio Pro
+# Почему здесь, а не [env] в Cargo.toml: секция [env] не является валидным
+# ключом манифеста Cargo.toml (cargo выдаёт warning и игнорирует её).
+# Файл .cargo/config.toml — единственный штатный способ задать env для сборки.
+
+[env]
+# cudarc 0.19.x не знает про CUDA 13.4 (максимум 13.3, формат "13030"),
+# поэтому сообщаем версию 13.3 — заголовки/драйверный API 13.4 совместимы.
+# Важно: CUDA 12.2+MSVC 14.50 несовместимы (STL1002 static_assert в yvals_core.h:
+# STL требует CUDA >= 12.4 для этого MSVC), поэтому тулкит — только 13.4.
+CUDARC_CUDA_VERSION = "13030"
+
+# Обёртка вокруг nvcc (scripts/nvcc_wrapper.rs): понижает .version в PTX до 9.0,
+# т.к. драйвер поддерживает CUDA 13.2, а nvcc 13.4 генерирует PTX ISA 9.4,
+# который драйвер отклоняет (CUDA_ERROR_UNSUPPORTED_PTX_VERSION).
+NVCC = "F:\\DescreenStudioPro\\scripts\\nvcc_wrapper.exe"
+REAL_NVCC = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4\\bin\\nvcc.exe"
+CUDA_PATH = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4"
+CUDA_HOME = "C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.4"
+
+# Флаги для nvcc: стандартный препроцессор MSVC (/Zc:preprocessor) обязателен
+# для CCCL-заголовков CUDA 13.x. Передаём через NVCC_PREPEND_FLAGS — nvcc сам
+# читает эту переменную (cudaforge не читает CUDA_NVCC_FLAGS).
+# -allow-unsupported-compiler — подстраховка на случай незнакомого nvcc MSVC.
+NVCC_PREPEND_FLAGS = "-allow-unsupported-compiler -Xcompiler=/Zc:preprocessor"
+
+# Compute capability GPU. Задаём явно: авто-детект через nvidia-smi/NVML
+# на этой машине не работает (драйвер 595.79 возвращает NVML Unknown Error),
+# а cudaforge падает без этого значения. RTX 3080 Ti Laptop = sm_86.
+CUDA_COMPUTE_CAP = "86"
+
+# Хост-компилятор MSVC для nvcc. VS BuildTools 14.50 новее известных nvcc 12.2,
+# поэтому в CUDA_NVCC_FLAGS выше стоит -allow-unsupported-compiler.
+NVCC_CCBIN = "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\bin\\Hostx64\\x64\\cl.exe"
+
+# INCLUDE/LIB для cl.exe (MSVC + Windows SDK 10.0.26100.0) — без них nvcc
+# не сможет скомпилировать хост-код .cu-файлов.
+INCLUDE = "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\include;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\ucrt;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um;C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\shared"
+LIB = "C:\\Program Files (x86)\\Microsoft Visual Studio\\18\\BuildTools\\VC\\Tools\\MSVC\\14.50.35717\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\ucrt\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\10.0.26100.0\\um\\x64"
+
+[build]
+target = "x86_64-pc-windows-msvc"

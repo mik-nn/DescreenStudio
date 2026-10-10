@@ -117,7 +117,8 @@ def make_patch(spec: dict, out_dirs: tuple[Path, Path]) -> dict:
     mixed = spec["kind"] == "photo" and rng.random() < MIXED_PROB
     if mixed:
         gt = overlay_headline(gt, rng)
-    lpi = rng.uniform(*LPI_RANGE[spec["preset"]])
+    lpi_rng = spec.get("lpi_range") or LPI_RANGE[spec["preset"]]
+    lpi = rng.uniform(*lpi_rng)
     tint = sample_paper_tint(rng)
     pcfg = preset(spec["preset"], seed=spec["print_seed"]).with_overrides(
         lpi=lpi, ink_set=spec["ink_set"], paper_tint=tint
@@ -171,34 +172,44 @@ def make_patch(spec: dict, out_dirs: tuple[Path, Path]) -> dict:
     }
 
 
-def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int = 0) -> list[dict]:
+def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int = 0,
+               preset_force: str | None = None, dpi_force: int | None = None,
+               lpi_range: tuple[float, float] | None = None) -> list[dict]:
     rng = random.Random(seed)
     plan = []
     for i in range(n):
         kind = "photo" if rng.random() < PHOTO_PROB else "doc"
         pool = photos if kind == "photo" else docs
+        # RNG тянем всегда одинаково (план детерминирован seed'ом); force —
+        # override после розыгрыша, чтобы планы разных корней с тем же seed
+        # совпадали по файлам/краскам (парные эксперименты DPI vs DPI).
+        dpi_drawn = pick_weighted(rng, DPI_CHOICES)
+        preset_drawn = pick_weighted(rng, PRESET_WEIGHTS)
         plan.append(
             {
                 "id": f"p{start + i:05d}",
                 "kind": kind,
                 "file": rng.choice(pool),
-                "scan_dpi": pick_weighted(rng, DPI_CHOICES),
-                "preset": pick_weighted(rng, PRESET_WEIGHTS),
+                "scan_dpi": dpi_force or dpi_drawn,
+                "preset": preset_force or preset_drawn,
                 "ink_set": pick_weighted(rng, INK_WEIGHTS),
                 "seed": rng.randint(0, 2**31 - 1),
                 "print_seed": rng.randint(0, 2**31 - 1),
                 "scan_seed": rng.randint(0, 2**31 - 1),
+                "lpi_range": lpi_range,
             }
         )
     return plan
 
 
-def run_split(root: Path, name: str, n: int, photos: list[str], docs: list[str], seed: int, workers: int) -> None:
+def run_split(root: Path, name: str, n: int, photos: list[str], docs: list[str], seed: int, workers: int,
+              preset_force: str | None = None, dpi_force: int | None = None,
+              lpi_range: tuple[float, float] | None = None) -> None:
     out = root / name
     scan_dir, gt_dir = out / "scan", out / "gt"
     scan_dir.mkdir(parents=True, exist_ok=True)
     gt_dir.mkdir(parents=True, exist_ok=True)
-    plan = build_plan(n, photos, docs, seed)
+    plan = build_plan(n, photos, docs, seed, preset_force=preset_force, dpi_force=dpi_force, lpi_range=lpi_range)
     todo = [s for s in plan if not (scan_dir / f"{s['id']}.png").exists() or not (gt_dir / f"{s['id']}.png").exists()]
     print(f"{name}: total={n} todo={len(todo)} workers={workers}", flush=True)
     manifest = out / "manifest.jsonl"
@@ -229,15 +240,25 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=12)
     ap.add_argument("--val-photos", type=int, default=200)
     ap.add_argument("--val-docs", type=int, default=50)
+    ap.add_argument("--preset-force", default=None, help="фиксированный пресет (напр. magazine для добора LPI-щели)")
+    ap.add_argument("--dpi-force", type=int, default=None, help="фиксированный scan_dpi (напр. 600)")
+    ap.add_argument("--lpi-min", type=float, default=None)
+    ap.add_argument("--lpi-max", type=float, default=None)
     args = ap.parse_args()
+    lpi_range = None
+    if args.lpi_min is not None or args.lpi_max is not None:
+        assert args.lpi_min is not None and args.lpi_max is not None, "--lpi-min/--lpi-max задаются парой"
+        lpi_range = (args.lpi_min, args.lpi_max)
     root = Path(args.root)
     photos = sorted(str(p) for p in GT_PHOTOS.glob("*.jpg"))
     docs = sorted(str(p) for p in GT_DOCS.glob("*.png"))
     assert len(photos) > args.val_photos and len(docs) > args.val_docs
     train_photos, val_photos = photos[:- args.val_photos], photos[-args.val_photos :]
     train_docs, val_docs = docs[:- args.val_docs], docs[-args.val_docs :]
-    run_split(root, "train", args.train, train_photos, train_docs, args.seed, args.workers)
-    run_split(root, "val", args.val, val_photos, val_docs, args.seed + 1, args.workers)
+    run_split(root, "train", args.train, train_photos, train_docs, args.seed, args.workers,
+              preset_force=args.preset_force, dpi_force=args.dpi_force, lpi_range=lpi_range)
+    run_split(root, "val", args.val, val_photos, val_docs, args.seed + 1, args.workers,
+              preset_force=args.preset_force, dpi_force=args.dpi_force, lpi_range=lpi_range)
     summary = {
         "train": args.train,
         "val": args.val,
@@ -245,6 +266,9 @@ def main() -> None:
         "photo_prob": PHOTO_PROB,
         "presets": PRESET_WEIGHTS,
         "dpi": DPI_CHOICES,
+        "preset_force": args.preset_force,
+        "dpi_force": args.dpi_force,
+        "lpi_range": lpi_range,
     }
     (root / "dataset.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
 

@@ -68,6 +68,10 @@ class BlendConfig:
     edge_stride: int = 64
     edge_lo_q: float = 0.5
     edge_hi_q: float = 0.95
+    # Сглаживание весовой карты Гауссом, px. Критично: карта из src несёт
+    # модуляцию на частоте растра (w_hf 60 -> пик 0.1417 реплицируется на
+    # 0.1492 свёрткой), sigma=8 подавляет её до уровня фона (2026-09-21).
+    map_sigma: float = 8.0
 
 
 @dataclass(frozen=True)

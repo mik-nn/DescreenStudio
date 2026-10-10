@@ -11,10 +11,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [dependencies]
 # Candle for ML inference (primary)
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
-safetensors = "0.5"
+candle-core = { git = "https://github.com/huggingface/candle", branch = "main", features = ["cuda"] }
+candle-nn = { git = "https://github.com/huggingface/candle", branch = "main" }
+safetensors = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+half = "2.4"
 
 # ONNX runtime as fallback
 ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml"], optional = true }
@@ -47,3 +48,7 @@ path = "src/bin/candle_bench.rs"
 [features]
 default = ["ort-backend"]
 ort-backend = ["dep:ort"]
+
+# Примечание: настройки CUDA для сборки (CUDARC_CUDA_VERSION, CUDA_PATH, NVCC)
+# перенесены в .cargo/config.toml в корне репозитория — секция [env] здесь
+# невалидна и cargo её игнорировал (warning "unused manifest key: env").

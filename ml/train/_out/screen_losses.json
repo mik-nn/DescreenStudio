@@ -1,0 +1,74 @@
+[
+ {
+  "arm": "base",
+  "val": {
+   "Data/synth": 32.13,
+   "Data/synth_run4": 29.78,
+   "Data/synth_1200": 30.83
+  },
+  "worst": 29.78,
+  "defect": {
+   "psnr": 29.81,
+   "ssim": 0.877,
+   "d1": 0.419,
+   "d2": 11.263,
+   "edge_hf": 0.936,
+   "flat_hf": 0.902,
+   "top4": 188.945
+  }
+ },
+ {
+  "arm": "lpips05",
+  "val": {
+   "Data/synth": 32.13,
+   "Data/synth_run4": 29.78,
+   "Data/synth_1200": 30.83
+  },
+  "worst": 29.78,
+  "defect": {
+   "psnr": 29.811,
+   "ssim": 0.877,
+   "d1": 0.422,
+   "d2": 10.381,
+   "edge_hf": 0.936,
+   "flat_hf": 0.906,
+   "top4": 189.31
+  }
+ },
+ {
+  "arm": "grad10",
+  "val": {
+   "Data/synth": 32.14,
+   "Data/synth_run4": 29.78,
+   "Data/synth_1200": 30.83
+  },
+  "worst": 29.78,
+  "defect": {
+   "psnr": 29.821,
+   "ssim": 0.877,
+   "d1": 0.418,
+   "d2": 11.251,
+   "edge_hf": 0.936,
+   "flat_hf": 0.903,
+   "top4": 189.453
+  }
+ },
+ {
+  "arm": "edge20",
+  "val": {
+   "Data/synth": 32.14,
+   "Data/synth_run4": 29.79,
+   "Data/synth_1200": 30.83
+  },
+  "worst": 29.79,
+  "defect": {
+   "psnr": 29.817,
+   "ssim": 0.876,
+   "d1": 0.418,
+   "d2": 11.271,
+   "edge_hf": 0.935,
+   "flat_hf": 0.902,
+   "top4": 189.136
+  }
+ }
+]

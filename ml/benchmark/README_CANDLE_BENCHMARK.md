@@ -186,6 +186,27 @@ cargo update
 cargo build --bin candle_bench
 ```
 
+### Ошибка запуска: "the provided PTX was compiled with an unsupported toolchain"
+
+Тулкит CUDA новее драйвера (nvcc генерирует PTX ISA, которую драйвер не принимает).
+Сборка проекта понижает `.version` в PTX до 9.0 автоматически — через обёртку
+`scripts/nvcc_wrapper.exe` (исходник `scripts/nvcc_wrapper.rs`, задаётся
+переменной `NVCC` в `.cargo/config.toml`). После изменения обёртки пересоберите
+ядра: `cargo clean -p candle-kernels && cargo build`.
+
+### Ошибка запуска: "cublas64_13.dll / curand64_10.dll not found"
+
+В CUDA 13.x runtime-DLL лежат в `bin\x64` (не в `bin`). Добавьте в PATH:
+```
+C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.4\bin\x64
+```
+
+### Все настройки CUDA сборки
+
+Вынесены в `.cargo/config.toml` (корень репозитория): версия CUDA для cudarc,
+пути к nvcc/MSVC, compute capability, INCLUDE/LIB. Секция `[env]` в `Cargo.toml`
+невалидна — cargo её игнорирует (warning "unused manifest key: env").
+
 ## Следующие шаги
 
 1. **Сравнение с ONNX**: Запустите `descreen_bench` с той же моделью в ONNX формате

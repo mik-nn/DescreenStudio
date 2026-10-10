@@ -6,6 +6,37 @@ use ndarray::{Array3, Array4, s};
 use ndarray::prelude::*;
 
 use descreen_studio::{runtime, Ep, InferenceEngine, TileParams};
+
+/// Загрузка PNG/JPG в [3, H, W] f32 [0, 1].
+fn load_image(path: &str) -> Result<Array3<f32>, Box<dyn Error>> {
+    let img = image::open(path)?.to_rgb8();
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let mut arr = Array3::<f32>::zeros((3, h, w));
+    for (i, p) in img.pixels().enumerate() {
+        let (y, x) = (i / w, i % w);
+        arr[[0, y, x]] = p[0] as f32 / 255.0;
+        arr[[1, y, x]] = p[1] as f32 / 255.0;
+        arr[[2, y, x]] = p[2] as f32 / 255.0;
+    }
+    Ok(arr)
+}
+
+/// Сохранение [3, H, W] f32 [0, 1] в PNG.
+fn save_image(path: &str, arr: &Array3<f32>) -> Result<(), Box<dyn Error>> {
+    let (_, h, w) = (arr.shape()[0], arr.shape()[1], arr.shape()[2]);
+    let mut bytes = vec![0u8; 3 * h * w];
+    for c in 0..3 {
+        for y in 0..h {
+            for x in 0..w {
+                bytes[(y * w + x) * 3 + c] =
+                    (arr[[c, y, x]].clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+    }
+    image::save_buffer(path, &bytes, w as u32, h as u32, image::ColorType::Rgb8)?;
+    Ok(())
+}
+
 /// Deterministic synthetic scan (gradient + low-noise), [0, 1], channels-first.
 fn synthetic_scan(h: usize, w: usize) -> Array3<f32> {
     let mut img = Array3::<f32>::zeros((3, h, w));
@@ -39,6 +70,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut dump_dir: Option<String> = None;
     let mut chain_in: Option<String> = None;
     let mut chain_blend = 1.0f32;
+    let mut image_in: Option<String> = None;
+    let mut out_path: Option<String> = None;
     let args: Vec<String> = env::args().collect();
     let mut i = 1;
     while i < args.len() {
@@ -53,6 +86,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--chain" => { i += 1; chain_in = Some(args[i].clone()); }
             "--blend" => { i += 1; chain_blend = args[i].parse()?; }
             "--dump" => { i += 1; dump_dir = Some(args[i].clone()); }
+            "--image" => { i += 1; image_in = Some(args[i].clone()); }
+            "--out" => { i += 1; out_path = Some(args[i].clone()); }
             "--ep" => {
                 i += 1;
                 ep = match args[i].as_str() {
@@ -98,6 +133,35 @@ fn main() -> Result<(), Box<dyn Error>> {
             last.0,
             last.1
         );
+        return Ok(());
+    }
+
+    // Raw-image mode: модель против модели без префильтра (честное сравнение
+    // с candle_bench --image). Вход как есть -> tiled inference -> save.
+    if let Some(path) = image_in {
+        let tp = TileParams { tile, overlap };
+        let img = load_image(&path)?;
+        let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
+
+        let warm = Array3::zeros((3, tile, tile));
+        engine.descreen(&warm, tp)?;
+
+        let t0 = Instant::now();
+        let out = engine.descreen(&img, tp)?;
+        let dt = t0.elapsed();
+
+        let col_a = out.index_axis(Axis(2), 62.min(w - 1)).mean().unwrap();
+        let col_b = out.index_axis(Axis(2), 70.min(w - 1)).mean().unwrap();
+        println!(
+            "image {path}: {w}x{h} -> total {:.2}s ({} ch), seam-sample delta: {:.4}",
+            dt.as_secs_f64(),
+            c,
+            (col_a - col_b).abs()
+        );
+        if let Some(path) = out_path {
+            save_image(&path, &out)?;
+            println!("saved: {path}");
+        }
         return Ok(());
     }
 

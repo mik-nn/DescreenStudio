@@ -1,0 +1,9 @@
+{
+ "notch_variants": {
+  "Magazine": {
+   "prod": "resid=  300.4 sharp=0.41 LF=0.78",
+   "wide2": "resid=  305.0 sharp=0.40 LF=0.78",
+   "ang4": "resid=  960.3 sharp=0.54 LF=0.78"
+  }
+ }
+}

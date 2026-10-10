@@ -41,5 +41,13 @@ def blend_map(
 def adaptive_blend(
     pre: np.ndarray, net: np.ndarray, src: np.ndarray, cfg: BlendConfig
 ) -> np.ndarray:
-    w = blend_map(src, cfg)[..., None]
+    w = blend_map(src, cfg)
+    if cfg.map_sigma > 0:
+        # Карта из src модулирована растром -> свёртка реплицирует остаточный
+        # пик pre обратно на частоту растра (измерено: resid 53.5 -> 90).
+        # Гаусс sigma=8 (период растра ~6.7 px) подавляет модуляцию.
+        from scipy.ndimage import gaussian_filter
+
+        w = gaussian_filter(w, cfg.map_sigma)
+    w = w[..., None]
     return np.clip(pre * (1.0 - w) + net * w, 0.0, 1.0).astype(np.float32)

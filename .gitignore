@@ -1,6 +1,6 @@
-```
 # Dependencies
 target/
+node_modules/
 Cargo.lock
 
 # Logs and temp files
@@ -34,7 +34,6 @@ pip-delete-this-directory.txt
 nosetests.xml
 coverage.xml
 *.cover
-*.log
 .git/
 .mypy_cache/
 .pytest_cache/
@@ -54,6 +53,7 @@ dist/
 *.a
 *.lib
 *.out
+*.pdb
 
 # Compression
 *.zip
@@ -78,4 +78,19 @@ dist/
 *.tar.bz2
 *.tar.xz
 *.tar.zst
-```
+
+# Данные и экспериментальные артефакты (вне git: AGENTS.md)
+/Data/
+/Temp/
+ml/Archiv/
+ml/export/
+ml/train/_run*/
+ml/train/_run8_launched
+ml/train/*.db
+ml/analysis/_plates/
+ml/analysis/_*.json
+ml/simulator/_preview/
+ml/simulator/_preview2/
+ml/simulator/_scan/
+src-tauri/model*.onnx
+src-tauri/gen/

@@ -1,0 +1,47 @@
+[
+ {
+  "arm": "base",
+  "scores": {
+   "Data/synth": 28.13,
+   "Data/synth_run4": 26.56,
+   "Data/synth_1200": 26.15
+  },
+  "score": 26.15
+ },
+ {
+  "arm": "charb",
+  "scores": {
+   "Data/synth": 28.45,
+   "Data/synth_run4": 26.57,
+   "Data/synth_1200": 27.24
+  },
+  "score": 26.57
+ },
+ {
+  "arm": "focal",
+  "scores": {
+   "Data/synth": 27.28,
+   "Data/synth_run4": 25.15,
+   "Data/synth_1200": 25.74
+  },
+  "score": 25.15
+ },
+ {
+  "arm": "aux",
+  "scores": {
+   "Data/synth": 28.72,
+   "Data/synth_run4": 26.7,
+   "Data/synth_1200": 26.61
+  },
+  "score": 26.61
+ },
+ {
+  "arm": "combo",
+  "scores": {
+   "Data/synth": 26.64,
+   "Data/synth_run4": 25.41,
+   "Data/synth_1200": 25.21
+  },
+  "score": 25.21
+ }
+]

@@ -3,7 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from ml.model.ffblock import FFCBlock
+from ml.model.ffblock import FFCBlock, FFCBlockV2, TransformerBottle
+from ml.model.film import COND_DIM, FiLMCondition
 
 
 class Down(nn.Module):
@@ -30,8 +31,10 @@ class Up(nn.Module):
         return self.op(x)
 
 
-def _blocks(ch: int, n: int, spectral: bool) -> nn.Sequential:
-    return nn.Sequential(*[FFCBlock(ch, use_spectral=spectral) for _ in range(n)])
+def _blocks(ch: int, n: int, spectral: bool, spectral_mode: str = "plain",
+            ff_norm: bool = False, ff_zero_init: bool = False) -> nn.Sequential:
+    return nn.Sequential(*[FFCBlockV2(ch, use_spectral=spectral, spectral_mode=spectral_mode,
+                                      ff_norm=ff_norm, ff_zero_init=ff_zero_init) for _ in range(n)])
 
 
 class FourierUNet(nn.Module):
@@ -45,23 +48,43 @@ class FourierUNet(nn.Module):
         bottleneck_blocks: int = 2,
         dec_blocks: tuple[int, ...] = (1, 1),
         spectral: tuple[bool, ...] = (True, True, True),
+        spectral_mode: str = "plain",
+        bottleneck_attn: bool = False,  # TransformerBottle (MDTA) после FFC bottleneck
+        cond_dim: int = 0,  # >0: FiLM-conditioning bottleneck на вектор A0 (0 = run7-поведение)
+        aux: bool = False,  # aux-головы декодера для deep supervision (только трейн, в инференсе отбрасываются)
+        ff_norm: bool = False,  # LayerNorm на выходе spectral-ветвей (фикс pile-up run12)
+        ff_zero_init: bool = False,  # zero-init последних conv spectral-ветви (отдельно от нормы)
     ):
         super().__init__()
         assert levels in (2, 3)
         assert len(enc_blocks) == levels - 1 and len(dec_blocks) == levels - 1
         assert len(spectral) == levels
+        self.cond_dim = cond_dim
+        self.has_aux = aux
         self.inc = nn.Conv2d(in_channels, base, kernel_size=3, padding=1)
         chs = [base * 2**i for i in range(levels)]
-        self.encs = nn.ModuleList(_blocks(chs[i], enc_blocks[i], spectral[i]) for i in range(levels - 1))
+        self.encs = nn.ModuleList(_blocks(chs[i], enc_blocks[i], spectral[i], spectral_mode, ff_norm, ff_zero_init) for i in range(levels - 1))
         self.downs = nn.ModuleList(Down(chs[i], chs[i + 1]) for i in range(levels - 1))
-        self.bottleneck = _blocks(chs[-1], bottleneck_blocks, spectral[-1])
+        self.bottleneck = _blocks(chs[-1], bottleneck_blocks, spectral[-1], spectral_mode, ff_norm, ff_zero_init)
+        self.film = FiLMCondition(cond_dim, chs[-1]) if cond_dim > 0 else None
+        self.attn = TransformerBottle(chs[-1]) if bottleneck_attn else None
         self.ups = nn.ModuleList(Up(chs[i + 1], chs[i]) for i in range(levels - 2, -1, -1))
         self.decs = nn.ModuleList(
-            _blocks(chs[i], dec_blocks[i], spectral[i]) for i in range(levels - 2, -1, -1)
+            _blocks(chs[i], dec_blocks[i], spectral[i], spectral_mode, ff_norm, ff_zero_init) for i in range(levels - 2, -1, -1)
         )
         self.outc = nn.Conv2d(base, out_channels, kernel_size=3, padding=1)
+        # aux-головы на стадиях декодера кроме финальной (прямое предсказание RGB):
+        # levels=3 -> [голова 1/2 (chs[1])]; создаются ТОЛЬКО при aux=True,
+        # иначе state_dict несовместим со старыми чекпоинтами
+        self.aux_heads = nn.ModuleList(
+            nn.Conv2d(chs[i], out_channels, kernel_size=1) for i in range(levels - 2, 0, -1)
+        ) if aux else nn.ModuleList()
+        if aux and len(self.aux_heads) == 0:
+            raise ValueError("aux=True needs levels>=3 (no intermediate decoder stages)")
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, x: torch.Tensor, cond: torch.Tensor | None = None,
+                return_features: bool = False,
+                return_aux: bool = False) -> torch.Tensor | tuple:
         feats = []
         e = torch.nn.functional.gelu(self.inc(x))
         for enc, down in zip(self.encs, self.downs):
@@ -69,22 +92,37 @@ class FourierUNet(nn.Module):
             feats.append(e)
             e = down(e)
         b = self.bottleneck(e)
+        if self.film is not None and cond is not None:
+            b = self.film(b, cond)
+        if self.attn is not None:
+            b = self.attn(b)
         d = b
-        for up, dec, skip in zip(self.ups, self.decs, reversed(feats)):
+        auxs: list[torch.Tensor] = []
+        stages = list(zip(self.ups, self.decs, reversed(feats)))
+        for si, (up, dec, skip) in enumerate(stages):
             d = dec(up(d) + skip)
+            if si < len(self.aux_heads):
+                auxs.append(self.aux_heads[si](d))
         residual = self.outc(d)
         base = x[:, :3] if x.shape[1] > 3 else x
         out = torch.clamp(base - residual, 0.0, 1.0)
         if return_features:
             return out, b
+        if return_aux:
+            if not self.has_aux:
+                raise ValueError("return_aux=True needs aux=True model")
+            return out, auxs
         return out
 
-    def bottleneck_features(self, x: torch.Tensor) -> torch.Tensor:
+    def bottleneck_features(self, x: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         e = torch.nn.functional.gelu(self.inc(x))
         for enc, down in zip(self.encs, self.downs):
             e = enc(e)
             e = down(e)
-        return self.bottleneck(e)
+        b = self.bottleneck(e)
+        if self.film is not None and cond is not None:
+            b = self.film(b, cond)
+        return b
 
     def param_count(self) -> int:
         return sum(p.numel() for p in self.parameters())
