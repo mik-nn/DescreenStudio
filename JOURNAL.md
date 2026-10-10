@@ -24,7 +24,7 @@
 
 **Артефакты:** `src-tauri/src/{unsharp.rs, app.rs, lib.rs}`, `ml/preproc/{spectrum.py, metrics.py}`, `Temp/{nyq_prep,nyq_eval,nyq_sweep_eval}.py`, `Temp/run_nyq_{final,sweep}.ps1`, `Temp/nyq_final.log`, `Data/RealScan/_nyq/{manifest,quality}.json`, `Data/RealScan/_nyq_sweep/sweep.json`, кропы `cmp_*_final.png`.
 
-**Следующий шаг:** интеграция Найквист-режима в продукт (даунсэмпл до цепочки в `descreen_file`) + перенос `nyq_prep` в `ml/benchmark`; разбор Pack (sharp 1.37/dE 6.83) и BookCOver; edge-метрики/дельта-E в Rust-приёмку; Этап 3 (экспорт ONNX эталона).
+**Следующий шаг:** интеграция Найквист-режима в продукт (даунсэмпл до цепочки в `descreen_file`) + перенос `nyq_prep` в `ml/benchmark`; разбор Pack (sharp 1.37/dE 6.83) и BookCOver; edge-метрики/дельта-E в Rust-приёмку; Candle-продукт (safetensors эталона → candle, замена ort-ветки; ONNX закрыт 2026-09-21).
 
 ---
 
@@ -46,7 +46,7 @@
 
 **Артефакты:** `Data/RealScan/_sharp26/`, `_sharp26b/`, `_eval_run27u_panel11/`, `Temp/sharp26*.log`, `Temp/panel27u.log`.
 
-**Следующий шаг:** BookCOver sharp-хвост (amount-коробка vs обучение) либо движение к Этапу 3 (экспорт ONNX текущего эталона) — по решению владельца.
+**Следующий шаг:** BookCOver sharp-хвост (amount-коробка vs обучение) либо движение к Candle-продукту (safetensors эталона; ONNX закрыт) — по решению владельца.
 
 ---
 
