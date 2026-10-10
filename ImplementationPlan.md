@@ -8,8 +8,8 @@
 **Цель проекта:** Создание высокопроизводительного, портативного кроссплатформенного приложения для устранения полиграфического растра (дескрининга), муара и сканерных шумов с сохранением мелких деталей и четкости текста/контуров.
 
 **Ключевой стек:**
-* **Dataset Synthesis & AI Training:** PyTorch 2.x, PyTorch Lightning, ONNX / ONNX Runtime.
-* **Core Engine (Backend):** Rust (Tauri v2 Core), `ort` (ONNX Runtime Rust binding), `ndarray`, `image`, `rayon`.
+* **Dataset Synthesis & AI Training:** PyTorch 2.x, PyTorch Lightning.
+* **Core Engine (Backend):** Rust (Tauri v2 Core), **Candle** (HF, safetensors + CUDA), `ndarray`, `image`, `rayon`.
 * **Hardware Acceleration:** DirectML (Windows), CoreML / Metal (macOS), CUDA / Vulkan (Linux).
 * **GUI (Frontend):** Svelte 5, Tailwind CSS v4, HTML5 Canvas / WebGL.
 
@@ -174,47 +174,28 @@ Loss_total = L1 + λ1 * Loss_MS-SSIM + λ2 * Loss_Fourier_Mag + λ3 * Loss_LPIPS
 
 ---
 
-## 5. Фаза 3: Конвертация и оптимизация ONNX
+## 5. Фаза 3: Конвертация весов (PyTorch → safetensors)
 
-### 5.1. Экспорт PyTorch → ONNX
-Модель экспортируется с динамическими размерами осей для возможности обработки фрагментов произвольного размера.
+> **Решение (зафиксировано в архитектуре 2026-09-21, тесты проведены ранее):** инференс в Rust — через **Candle** (Hugging Face), а не через ONNX Runtime. Замеры показали, что **Candle в ~8 раз эффективнее**; в плане это было не отражено — пробел закрыт. Плюсы: нативные safetensors (экспорт = копирование весов без трассировки графа), чистый Rust без C-зависимостей `ort`, CUDA-бэкенд уже валидирован бенчмарком (`src-tauri/src/bin/candle_bench.rs`). Фиксация: `JOURNAL.md`, 2026-09-21 (ночь).
 
-```python
-import torch
+### 5.1. Экспорт PyTorch → safetensors
+Экспорт — тривиальное копирование state_dict (динамические размеры осей поддерживаются по построению, граф не фиксируется).
 
-def export_fourier_unet():
-    model = FourierUNet().eval()
-    dummy_input = torch.randn(1, 3, 512, 512)
-
-    torch.onnx.export(
-        model,
-        dummy_input,
-        "fourier_descreen_unet.onnx",
-        export_params=True,
-        opset_version=17,
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['output'],
-        dynamic_axes={
-            'input': {0: 'batch_size', 2: 'height', 3: 'width'},
-            'output': {0: 'batch_size', 2: 'height', 3: 'width'}
-        }
-    )
-    print("ONNX модель успешно экспортирована.")
-
-if __name__ == "__main__":
-    export_fourier_unet()
+```bash
+# ml/benchmark/convert_to_safetensors.py (готов)
+python ml/benchmark/convert_to_safetensors.py ml/train/_<run>/best.pt Temp/<run>.safetensors
 ```
 
-### 5.2. Квантование и оптимизация графика
-* **FP16 Optimization:** Конвертация весов в FP16 для ускорения на GPU через TensorRT / DirectML.
-* **Graph Optimization:** Запуск `onnxruntime.transformers.optimizer` для слияния блоков Conv+GELU.
+### 5.2. Оптимизация инференса (candle)
+* **FP16:** прогон модели в F16 на CUDA-тензорах candle (WGPU/CUDA backend), сравнение точности с FP32 на валидационном срезе.
+* **Тайлинг + батчинг:** обработка тайлов 512×512 чанками по `batch` (бенчмарк batch 1/4/8, `candle_bench`), overlap 64 px.
+* **Опционально (позже):** квантование весов до Q8/Q4 через candle-форматы, если FP16 не даст целевой скорости.
 
 ---
 
 ## 6. Фаза 4: Backend Engine на Rust + Tauri v2
 
-Бэкенд на Rust отвечает за эффективный ввод-вывод TIFF/PNG сканов гигапиксельного размера, разбиение на тайлы, параллельный инференс через ONNX Runtime и сборку результата без артефактов на границах.
+Бэкенд на Rust отвечает за эффективный ввод-вывод TIFF/PNG сканов гигапиксельного размера, разбиение на тайлы, параллельный инференс через **Candle** (safetensors-веса, CUDA backend) и сборку результата без артефактов на границах.
 
 ### 6.1. Зависимости `Cargo.toml`
 ```toml
@@ -225,7 +206,10 @@ edition = "2021"
 
 [dependencies]
 tauri = { version = "2.0", features = [] }
-ort = { version = "2.0.0-rc.9", features = ["directml", "coreml", "cuda"] }
+candle-core = { version = "0.8", features = ["cuda"] }
+candle-nn = { version = "0.8" }
+safetensors = "0.4"
+tokenizers = "0.20" # не требуется (CNN), удалить при чистке
 ndarray = "0.15"
 image = "0.25"
 rayon = "1.10"
@@ -238,37 +222,30 @@ serde_json = "1.0"
 Для того чтобы на стыках тайлов 512×512 не возникало видимых швов, применяются **окна Ханна (Hann Windowing)** при сшивании перекрывающихся областей (Overlap = 64px).
 
 ```rust
-// src-tauri/src/inference.rs
+// src-tauri/src/inference.rs (эскиз; точный API — по candle_bench.rs)
 
-use ort::{inputs, ExecutionProviderDispatch, GraphOptimizationLevel, Session};
-use ndarray::{Array4, ArrayViewMut4};
-use rayon::prelude::*;
+use candle_core::{Device, Tensor, DType};
+use candle_nn::VarMap;
+use safetensors::SafeTensors;
 
 pub struct InferenceEngine {
-    session: Session,
+    device: Device,
+    // веса модели, загруженные из safetensors; forward реализован
+    // вручную поверх candle_nn (Conv2d, GroupNorm и т.д.)
 }
 
 impl InferenceEngine {
-    pub fn new(model_bytes: &[u8]) -> Result<Self, Box<dyn std::error::Error>> {
-        let session = Session::builder()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_execution_providers([
-                #[cfg(target_os = "windows")]
-                ort::DirectMLExecutionProvider::default().build(),
-                #[cfg(target_os = "macos")]
-                ort::CoreMLExecutionProvider::default().build(),
-            ])?
-            .commit_from_memory(model_bytes)?;
-
-        Ok(Self { session })
+    pub fn from_safetensors(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let device = Device::new_cuda(0)?;
+        // SafeTensors::load_from_file -> VarMap -> построение слоёв candle_nn
+        // ...
+        Ok(Self { device })
     }
 
-    pub fn process_tile(&self, input_patch: Array4<f32>) -> Result<Array4<f32>, Box<dyn std::error::Error>> {
-        let outputs = self.session.run(inputs!["input" => input_patch.view()]?)?;
-        let output_tensor = outputs["output"].extract_tensor::<f32>()?;
-        
-        let view = output_tensor.view();
-        Ok(view.to_shared().into_dimensionality::<ndarray::Ix4>()?)
+    pub fn process_tile(&self, batch: Tensor) -> Result<Tensor, Box<dyn std::error::Error>> {
+        // forward FourierUNet: conv encoder -> спектральные блоки (rustfft) -> decoder
+        // ...
+        Ok(batch) // результат той же формы [B, 3, H, W]
     }
 }
 ```
@@ -355,7 +332,7 @@ impl InferenceEngine {
 | :--- | :--- | :--- | :--- |
 | **Этап 1** | **Dataset Pipeline** | Python-скрипт синтеза пара растр/оригинал с AM/FM растром, TVI и шумами (10k+ патчей). | 1.5 нед. |
 | **Этап 2** | **Model & Training** | Реализация Fourier-UNet на PyTorch. Достижение показателей: **PSNR > 34 dB**, **SSIM > 0.95**. | 2 нед. |
-| **Этап 3** | **ONNX Export & Optimization** | Готовый `fourier_descreen_unet.onnx` с динамическими осями и FP16 квантованием. | 3 дня |
+| **Этап 3** | **Экспорт весов → safetensors + Candle-инференс** | `Temp/<run>.safetensors`, FP16-прогон на CUDA candle, бенчмарк batch 1/4/8. | 3 дня |
 | **Этап 4** | **Rust/Tauri Backend** | Интеграция `ort` с DirectML/CoreML, реализация Tiling & Overlap-Add алгоритма. (Скорость: критерий пересмотрен 2026-09-14 — замеренный профиль вместо <2.5 с, см. §9.2.) | 1.5 нед. |
 | **Этап 5** | **Frontend & UI/UX** | Svelte 5 + Tailwind UI с просмотром 2D FFT спектра и режима split-screen сравнения. | 1 нед. |
 | **Этап 6** | **Release & Packaging** | Автоматическая сборка через GitHub Actions: `.exe` (Win 10/11) и `.dmg` (macOS). | 3 дня |
