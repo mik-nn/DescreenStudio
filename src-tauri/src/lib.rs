@@ -2,6 +2,7 @@ pub mod app;
 pub mod inference;
 pub mod prefilter;
 pub mod runtime;
+pub mod unsharp;
 
 pub use inference::{Ep, InferenceEngine, TileParams};
 

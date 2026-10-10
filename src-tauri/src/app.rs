@@ -221,13 +221,15 @@ pub fn descreen_file(
     let wmap = blend_map(&img, &pcfg);
     // Full post-net tail (blend -> paper background -> tone), parameterized by
     // the correction scale k: net_corr = pre + k * (net - pre). Parity with
-    // `ml/preproc/backoff.apply_global` applied to net_raw before `finish`.
-    let finish = |net: &ndarray::Array3<f32>, k: f32| -> ndarray::Array3<f32> {
+    // `ml/preproc/backoff.apply_global` net_raw before `finish`. b_use — вес
+    // нейросети (адаптивный спад ниже, см. blend-fallback).
+    let finish = |net: &ndarray::Array3<f32>, k: f32, b_use: f32|
+     -> ndarray::Array3<f32> {
         let mut blended = ndarray::Array3::<f32>::zeros((3, hu, wu));
         for ch in 0..3 {
             for y in 0..hu {
                 for x in 0..wu {
-                    let w = (wmap[[y, x]] * b).clamp(0.0, 1.0);
+                    let w = (wmap[[y, x]] * b_use).clamp(0.0, 1.0);
                     let nv = pre[[ch, y, x]] + k * (net[[ch, y, x]] - pre[[ch, y, x]]);
                     blended[[ch, y, x]] = pre[[ch, y, x]] * (1.0 - w) + nv * w;
                 }
@@ -237,7 +239,7 @@ pub fn descreen_file(
         linear_tone(&swapped, &img)
     };
     let t00 = Instant::now();
-    let mut toned = finish(&out, 1.0);
+    let mut toned = finish(&out, 1.0, b);
     // Gated scalar backoff: the net correction may re-introduce periodicity
     // (case 1821146u, top4 113 -> 182); if the finished frame's top-4
     // residual peaks exceed the prefiltered input by > gate, re-run the tail
@@ -248,7 +250,7 @@ pub fn descreen_file(
         let t4_out = top4_peak_sum(&luma_of(&toned));
         let mut t4_after = t4_out;
         if t4_in > 0.0 && t4_out > t4_in * (1.0 + pcfg.backoff_gate) {
-            toned = finish(&out, pcfg.backoff_w);
+            toned = finish(&out, pcfg.backoff_w, b);
             t4_after = top4_peak_sum(&luma_of(&toned));
             backoff_fired = true;
         }
@@ -260,13 +262,52 @@ pub fn descreen_file(
         }
     }
     let t_finish = t00.elapsed();
+    // Adaptive unsharp (паритет ml/preproc/unsharp.py): feedback по
+    // lapvar-резкости к цели 1.0; DESCREEN_NO_UNSHARP=1 — выкл для A/B.
+    // Blend-fallback: если после потолка unsharp sharp < 0.90 — нейросеть
+    // съела контент (случай Calendar1 на Найквисте); хвост пересобирается
+    // на меньшем весе net (дешёво: inference уже сделан) и берётся вариант
+    // с лучшей резкостью.
+    let t00 = Instant::now();
+    let k_final = if backoff_fired { pcfg.backoff_w } else { 1.0 };
+    let no_unsharp = std::env::var_os("DESCREEN_NO_UNSHARP").is_some();
+    let (mut toned, mut us_amount, mut us_sharp) = if no_unsharp {
+        (toned, 0.0f32, 0.0f32)
+    } else {
+        crate::unsharp::adaptive_unsharp(&toned, &img)
+    };
+    let mut b_used = b;
+    if !no_unsharp && us_sharp < 0.90 && b > 0.4 {
+        let (orig_sharp, orig_amt) = (us_sharp, us_amount);
+        for bf in [0.4f32, 0.15] {
+            let t2 = finish(&out, k_final, bf);
+            let (o2, a2, s2) = crate::unsharp::adaptive_unsharp(&t2, &img);
+            if s2 > us_sharp {
+                toned = o2;
+                us_amount = a2;
+                us_sharp = s2;
+                b_used = bf;
+            }
+            if us_sharp >= 0.90 {
+                break;
+            }
+        }
+        if std::env::var_os("DESCREEN_STAGE_DBG").is_some() || b_used != b {
+            eprintln!(
+                "[stage] blend-fallback: b {b:.2} -> {b_used:.2} sharp {orig_sharp:.3} -> {us_sharp:.3} (amount {orig_amt:.2} -> {us_amount:.2})"
+            );
+        }
+    }
+    let t_unsharp = t00.elapsed();
     eprintln!(
-        "[timing] measure={:.1}s notch={:.1}s lf={:.1}s finish={:.1}s",
+        "[timing] measure={:.1}s notch={:.1}s lf={:.1}s finish={:.1}s unsharp={:.1}s",
         t_measure.as_secs_f64(),
         t_notch.as_secs_f64(),
         t_lf.as_secs_f64(),
-        t_finish.as_secs_f64()
+        t_finish.as_secs_f64(),
+        t_unsharp.as_secs_f64()
     );
+    eprintln!("[stage] unsharp: amount={us_amount:.2} sharp={us_sharp:.3}");
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         use crate::prefilter::{luma_of as _luma3, screen_band_energy as _sbe3};
         eprintln!("[stage] net bandE={:.4}", _sbe3(&_luma3(&out), 0.12, 0.18));
