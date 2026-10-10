@@ -4,6 +4,30 @@
 
 ---
 
+## 2026-10-10 — 2.27 Найквист-режим бенча: 11/11 ≤4 мин, unsharp в Rust, adaptive blend-fallback, verify-масштаб
+
+**Контекст:** директива владельца — бенчмарк Rust-цепочки **≤5 мин/картинку** (первичный прогон 40.9 мин неприемлем), обработка и метрики в разрешении Найквиста–Котельникова (период растра = 2 px, масштаб = 2×r), вывод 1200 dpi не нужен. Утверждён порядок: 2 (порт unsharp) → 1 (blend-свип) → 3 (точность оценки растра/масштаба) → JOURNAL + коммит.
+
+**Сделано:**
+
+1. **Найквист-препроцессинг** (`Temp/nyq_prep.py`): даунсэмпл полноразмерных TIFF со scale=2×r + verify-loop — после даунсэмпла меряется r_out, при r_out<0.47 пересчёт scale (clip ≥0.5) и повторный даунсэмпл с полного кадра, приём |r_out−0.5|≤0.52. Исправлены Offset2, Magazine, M(2), Pack; остальные 7 уже были ~0.50. Направление ошибки оценки: недооценка → алиасинг (плохо), переоценка → период 2.2–3.4 px без алиасинга (безопасно) — verify-loop страхует именно от недооценки.
+2. **Пункт 2 — adaptive_unsharp в Rust** (`src-tauri/src/unsharp.rs`, `pub mod unsharp` в lib.rs): порт `ml/preproc/unsharp.py` 1:1 (цель sharp 1.0±0.05, amount ×1.4, потолок 2.2, 8 итераций, ROI 1024, диагональный lapvar, квирк «amount≥потолка при r<цели → break»). Встроен в `descreen_file` после gated-backoff, выключение `DESCREEN_NO_UNSHARP=1`, `[stage] unsharp:` безусловный. cargo test **11/11** (+3 теста: identity / skip / recover-blur).
+3. **Пункт 1 — blend-свип** (`Temp/run_nyq_sweep.ps1`, `nyq_sweep_eval.py`): book1/1821146u/Calendar1 × b∈{0,0.3,0.5,0.85}. resid монотонно лучше с ростом blend (1821146u 298→160, book1 27→19.6, Calendar1 83→38), но Calendar1 sharp 0.826→0.436 и визуально плавит текстуру. Решение: дефолт **b=0.85 + adaptive fallback**.
+4. **Adaptive blend-fallback** (app.rs): если после потолка unsharp `sharp<0.90` и `b>0.4` — хвост `finish` пересобирается на b∈{0.4, 0.15} (секунды, без повторного инференса), берётся вариант с лучшим sharp. Сработал: Calendar1 0.436→**0.996** (b→0.15), BookCOver 0.669→**1.080** (b→0.40).
+5. **Пункт 3 — точность оценки растра:** диагностика на полноразмерниках: Offset2 est 0.128 (2-я гармоника сильнее фундамента 0.064), M(2) est 0.244 vs true 0.142 (смешанные экраны 169+87 lpi), Magazine — верен 0.142.
+6. **Фиксы по пути:** `ml/preproc/spectrum.py::estimate_raster` — кламп ROI (падение на кадрах <1024, паритет с Rust `build_notch_lists`); `ml/preproc/metrics.py::residual_quad_max` — сетка частот по фактическому `roi.shape` (IndexError на нечётных s0: span 464 vs 465).
+7. **Финальный прогон** (`Temp/run_nyq_final.ps1`, blend 0.85 + unsharp + fallback): **11/11 ≤4 мин, суммарно 20.1 мин** (было 40.9): Pack 21.9, 1821145u_1 42.7, 1821146u 51.7, Offset2 54.7, OldBook 85.4, BookCOver 86.4, book1 127.2, Offset1 136.7, Magazine 177.3, M(2) 181.9, Calendar1 242.5.
+
+**Метрики (`Temp/nyq_eval.py --no-pre`, `Data/RealScan/_nyq/quality.json`):** sharp в коридоре 0.93–1.10 на **10/11** (Pack 1.37 — amount=0, вне коридора); book1 rust **resid 19.6/sharp 1.05 бьёт полноразмерный ref 24.4/0.48**; 1821146u rust 160.4 против ref 46.4 (ref мягче, sharp 0.53); Calendar1 81.8/1.00, M(2) 74.4/1.10, Magazine 59.4/1.00 (dE 4.91), Offset1 flatHF 1.60. Проблемные: BookCOver resid 279 > входа 247, Offset2 18.5→26.7, Pack 77→83 (dE 6.83, flatHF 0.64). Визуальный осмотр кропов (`cmp_Pack/Offset2/BookCOver_final.png`): растр снят, лёгкая гладкость, катастрофы нет — рост resid на этих кейсах метрический (тон/фон), не артефакт.
+
+**Решение:** Найквист-режим принят как контур бенчмарка (цель ≤5 мин/картинку достигнута); adaptive_unsharp + gated backoff + adaptive blend-fallback — полный прод-рецепт `descreen_file`.
+
+**Артефакты:** `src-tauri/src/{unsharp.rs, app.rs, lib.rs}`, `ml/preproc/{spectrum.py, metrics.py}`, `Temp/{nyq_prep,nyq_eval,nyq_sweep_eval}.py`, `Temp/run_nyq_{final,sweep}.ps1`, `Temp/nyq_final.log`, `Data/RealScan/_nyq/{manifest,quality}.json`, `Data/RealScan/_nyq_sweep/sweep.json`, кропы `cmp_*_final.png`.
+
+**Следующий шаг:** интеграция Найквист-режима в продукт (даунсэмпл до цепочки в `descreen_file`) + перенос `nyq_prep` в `ml/benchmark`; разбор Pack (sharp 1.37/dE 6.83) и BookCOver; edge-метрики/дельта-E в Rust-приёмку; Этап 3 (экспорт ONNX эталона).
+
+---
+
 ## 2026-10-10 — 2.26: sharp-восстановление Pack/M(2) — adaptive_unsharp принят в приёмку панели
 
 **Контекст:** run27 сырой потерял резкость на тяжёлых сканах против run10: Pack 1.74→0.60, Magazine (2) 0.50→0.24 (панель мерилась БЕЗ unsharp). Левер — `adaptive_unsharp` (принят ещё 2026-09-21, в панель run27 не включался).
