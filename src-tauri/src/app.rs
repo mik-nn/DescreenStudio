@@ -10,7 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::inference::{Ep, InferenceEngine, TileParams};
 use crate::prefilter::{
     adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, linear_tone, luma_of,
-    return_background, subtract_lf, PrefilterCfg,
+    return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
 };
 use crate::runtime;
 
@@ -219,25 +219,53 @@ pub fn descreen_file(
     let elapsed_ms = t0.elapsed().as_millis() as u64;
     let b = blend.clamp(0.0, 1.0);
     let wmap = blend_map(&img, &pcfg);
-    let mut blended = ndarray::Array3::<f32>::zeros((3, hu, wu));
-    for ch in 0..3 {
-        for y in 0..hu {
-            for x in 0..wu {
-                let w = (wmap[[y, x]] * b).clamp(0.0, 1.0);
-                blended[[ch, y, x]] = pre[[ch, y, x]] * (1.0 - w) + out[[ch, y, x]] * w;
+    // Full post-net tail (blend -> paper background -> tone), parameterized by
+    // the correction scale k: net_corr = pre + k * (net - pre). Parity with
+    // `ml/preproc/backoff.apply_global` applied to net_raw before `finish`.
+    let finish = |net: &ndarray::Array3<f32>, k: f32| -> ndarray::Array3<f32> {
+        let mut blended = ndarray::Array3::<f32>::zeros((3, hu, wu));
+        for ch in 0..3 {
+            for y in 0..hu {
+                for x in 0..wu {
+                    let w = (wmap[[y, x]] * b).clamp(0.0, 1.0);
+                    let nv = pre[[ch, y, x]] + k * (net[[ch, y, x]] - pre[[ch, y, x]]);
+                    blended[[ch, y, x]] = pre[[ch, y, x]] * (1.0 - w) + nv * w;
+                }
             }
         }
-    }
-    let swapped = return_background(&img, &blended, pcfg.bg_sigma);
+        let swapped = return_background(&img, &blended, pcfg.bg_sigma);
+        linear_tone(&swapped, &img)
+    };
     let t00 = Instant::now();
-    let toned = linear_tone(&swapped, &img);
-    let t_tone = t00.elapsed();
+    let mut toned = finish(&out, 1.0);
+    // Gated scalar backoff: the net correction may re-introduce periodicity
+    // (case 1821146u, top4 113 -> 182); if the finished frame's top-4
+    // residual peaks exceed the prefiltered input by > gate, re-run the tail
+    // with the correction scaled to backoff_w.
+    let mut backoff_fired = false;
+    if pcfg.backoff_enabled {
+        let t4_in = top4_peak_sum(&luma_of(&pre));
+        let t4_out = top4_peak_sum(&luma_of(&toned));
+        let mut t4_after = t4_out;
+        if t4_in > 0.0 && t4_out > t4_in * (1.0 + pcfg.backoff_gate) {
+            toned = finish(&out, pcfg.backoff_w);
+            t4_after = top4_peak_sum(&luma_of(&toned));
+            backoff_fired = true;
+        }
+        if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+            eprintln!(
+                "[stage] backoff: top4 pre={t4_in:.1} final={t4_out:.1} gate={:.2} fired={backoff_fired} after={t4_after:.1}",
+                1.0 + pcfg.backoff_gate
+            );
+        }
+    }
+    let t_finish = t00.elapsed();
     eprintln!(
-        "[timing] measure={:.1}s notch={:.1}s lf={:.1}s bgswap+tone+blend={:.1}s",
+        "[timing] measure={:.1}s notch={:.1}s lf={:.1}s finish={:.1}s",
         t_measure.as_secs_f64(),
         t_notch.as_secs_f64(),
         t_lf.as_secs_f64(),
-        t_tone.as_secs_f64()
+        t_finish.as_secs_f64()
     );
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         use crate::prefilter::{luma_of as _luma3, screen_band_energy as _sbe3};

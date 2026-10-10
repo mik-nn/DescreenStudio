@@ -57,6 +57,14 @@ pub struct PrefilterCfg {
     pub blend_edge_stride: usize,
     pub blend_edge_lo_q: f32,
     pub blend_edge_hi_q: f32,
+    /// Gated scalar backoff (JOURNAL 2026-10-10, case 1821146u): if the
+    /// finished frame's top-4 residual peaks exceed the prefiltered input
+    /// by more than `backoff_gate` (relative), the net correction is
+    /// re-applied with weight `backoff_w`. Parity with
+    /// `ml/benchmark/eval_realscan.py --backoff-mode gated`.
+    pub backoff_enabled: bool,
+    pub backoff_gate: f32,
+    pub backoff_w: f32,
 }
 
 impl Default for PrefilterCfg {
@@ -97,6 +105,9 @@ impl Default for PrefilterCfg {
             blend_edge_stride: 64,
             blend_edge_lo_q: 0.5,
             blend_edge_hi_q: 0.95,
+            backoff_enabled: true,
+            backoff_gate: 0.25,
+            backoff_w: 0.5,
         }
     }
 }
@@ -838,6 +849,86 @@ pub fn residual_peak_xmean(gray: &Array2<f32>) -> f32 {
     best / (msum / (n * n) as f32 + 1e-9)
 }
 
+/// Residual top-k metric params (parity with `ml/preproc/metrics.py`).
+pub const TOP4_ROI: usize = 1024;
+pub const TOP4_R_MIN: f32 = 0.05;
+pub const TOP4_EXCL: f32 = 0.02;
+
+/// Top-4 residual peak sum (xmean normalization, disk+mirror exclusion) —
+/// Rust port of `metrics.residual_peaks_multi(k=4)`. Higher = more halftone
+/// left; the gated backoff compares this metric on the finished frame vs the
+/// prefiltered input.
+pub fn top4_peak_sum(gray: &Array2<f32>) -> f32 {
+    let (h, w) = (gray.shape()[0], gray.shape()[1]);
+    let s = h.min(w).min(TOP4_ROI);
+    let y0 = h / 2 - s / 2;
+    let x0 = w / 2 - s / 2;
+    // numpy slice span floor(s/2)*2 — keeps the ROI square for odd sizes.
+    let n = s - (s & 1);
+    let mut v = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            v[y * n + x] = gray[[y0 + y, x0 + x]];
+        }
+    }
+    let mean: f32 = v.iter().sum::<f32>() / v.len() as f32;
+    for val in v.iter_mut() {
+        *val -= mean;
+    }
+    let raw = fft2_forward(&v, n);
+    let half = n / 2;
+    let mut mag = vec![0.0f32; n * n];
+    let mut msum = 0.0f32;
+    for y in 0..n {
+        for x in 0..n {
+            // fftshift parity: out[i] = in[(i - n/2) mod n]
+            let m = raw[((y + n - half) % n) * n + ((x + n - half) % n)].norm();
+            mag[y * n + x] = m;
+            msum += m;
+        }
+    }
+    let mean_mag = msum / (n * n) as f32 + 1e-9;
+    for y in 0..n {
+        for x in 0..n {
+            let (_, _, r) = freq_at(x, y, n);
+            if r < TOP4_R_MIN {
+                mag[y * n + x] = 0.0;
+            }
+        }
+    }
+    let excl2 = TOP4_EXCL * TOP4_EXCL;
+    let mut sum = 0.0f32;
+    for _ in 0..4 {
+        let (mut bj, mut bi) = (0usize, 0usize);
+        let mut bv = 0.0f32;
+        for y in 0..n {
+            for x in 0..n {
+                if mag[y * n + x] > bv {
+                    bv = mag[y * n + x];
+                    bj = y;
+                    bi = x;
+                }
+            }
+        }
+        if bv <= 0.0 {
+            break;
+        }
+        sum += bv / mean_mag;
+        let (fx0, fy0, _) = freq_at(bi, bj, n);
+        for y in 0..n {
+            for x in 0..n {
+                let (fx, fy, _) = freq_at(x, y, n);
+                let d2 = (fx - fx0) * (fx - fx0) + (fy - fy0) * (fy - fy0);
+                let d2m = (fx + fx0) * (fx + fx0) + (fy + fy0) * (fy + fy0);
+                if d2 < excl2 || d2m < excl2 {
+                    mag[y * n + x] = 0.0;
+                }
+            }
+        }
+    }
+    sum
+}
+
 /// Screen-band energy: |F|^2 inside an annulus, relative to total.
 /// Targeted residual metric (unlike the global top peak, blind to content).
 pub fn screen_band_energy(gray: &Array2<f32>, r_lo: f32, r_hi: f32) -> f32 {
@@ -1152,6 +1243,43 @@ mod tests {
         };
         let (e0, e1) = (band(&g), band(&patch));
         assert!(e1 < e0 * 0.2, "notch must kill the grating band: {e0} -> {e1}");
+    }
+
+    #[test]
+    fn top4_flags_grating_and_notch_drops_it() {
+        let n = 256usize;
+        let mut g = vec![0.0f32; n * n];
+        for y in 0..n {
+            for x in 0..n {
+                let content = 0.35 + 0.3 * (x as f32 / n as f32);
+                let grating = 0.08 * (2.0 * PI * 0.15 * x as f32).cos();
+                g[y * n + x] = content + grating;
+            }
+        }
+        let arr = Array2::from_shape_vec((n, n), g.clone()).unwrap();
+        let t4 = top4_peak_sum(&arr);
+        // grating amplitude 0.08 on a flat ramp: dominant pair + mirror top4
+        // must stand far above the noise floor
+        assert!(t4 > 20.0, "grating top4 must be large, got {t4}");
+        // notch filter at the detected frequency collapses the peaks
+        let mean0: f32 = g.iter().sum::<f32>() / g.len() as f32;
+        let raw = fft2_forward(&g, n);
+        let lm = logmag_shifted(&raw, n);
+        let bg = box_blur(&lm, n, 7);
+        let diff: Vec<f32> = lm.iter().zip(bg.iter()).map(|(a, b)| (a - b).max(0.0)).collect();
+        let cfg = PrefilterCfg::default();
+        let (peaks, _) = detect_peaks(&diff, n, &cfg);
+        assert!(!peaks.is_empty());
+        let mask = notch_mask(n, &[(peaks[0].r, peaks[0].angle_deg)], 16.0 / 1024.0, 3, true);
+        let mut patch = g.clone();
+        apply_mask_patch(&mut patch, n, &mask);
+        let mean1: f32 = patch.iter().sum::<f32>() / patch.len() as f32;
+        assert!((mean0 - mean1).abs() < 1e-3);
+        let arr2 = Array2::from_shape_vec((n, n), patch).unwrap();
+        let t4b = top4_peak_sum(&arr2);
+        // gaussian notch is soft by design; top4 must still lose the grating
+        // dominance (observed 3975 -> ~1360 with a production-width notch)
+        assert!(t4b < t4 * 0.5, "notch must drop top4: {t4} -> {t4b}");
     }
 
     #[test]

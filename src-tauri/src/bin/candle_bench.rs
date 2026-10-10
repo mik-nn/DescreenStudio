@@ -259,7 +259,7 @@ impl Module for SpectralBlockSimple {
     }
 }
 
-include!("spectral_block_impl.rs");
+include!("../inc/spectral_block_impl.rs");
 
 // --- FFC Блок ---
 

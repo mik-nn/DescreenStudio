@@ -4,6 +4,27 @@
 
 ---
 
+## 2026-10-10 — 2.25б: gated backoff перенесён в Rust-цепочку
+
+**Контекст:** перенос принятого в 2.25 механизма в прод-ветку `src-tauri`.
+
+**Реализация:**
+- `top4_peak_sum` в `src-tauri/src/prefilter.rs` — порт `metrics.residual_peaks_multi(k=4)`: центральный ROI 1024 (с учётом чётности среза как в numpy), fftshift-паритет по индексам, диск `excl=0.02` **и зеркальный двойник**, нормировка на mean|F| до маскировки. Константы `TOP4_ROI/R_MIN/EXCL` — рядом с функцией.
+- Поля `backoff_enabled=true / backoff_gate=0.25 / backoff_w=0.5` в `PrefilterCfg` (конфиг-объект, по правилам AGENTS.md).
+- `descreen_file` (app.rs): хвост после инференса (blend → bgswap → tone) вынесен в замыкание `finish(net, k)`, где коррекция = `pre + k*(net−pre)` — 1:1 с `backoff.apply_global` до `finish`. Гейт меряет top4(luma pre) vs top4(luma final); при `final > pre×1.25` — повторный проход `finish(out, 0.5)`. Решение печатается в `[stage] backoff:` под `DESCREEN_STAGE_DBG`.
+
+**Тесты/починки:** новый `top4_flags_grating_and_notch_drops_it` (грейтинг top4 3975 → 1364 после нотча); `cargo test` 8/8 зелёные. По пути найдено: `spectral_block_impl.rs` (include!-фрагмент для `block_test`/`candle_bench`) лежал в `src/bin/` и автодискаверился сломанным бинарём — перенесён в `src/inc/`, иначе `cargo test` не собирался вовсе.
+
+**Паритет Python↔Rust (запуски `descreen_bench --chain`, DML, blend 0.85):**
+- 1821146u: top4 pre=**114.3** → final=192.6, gate 1.25 → **FIRED, after=122.1** (Python-панель: 113.5→182.1→112.4; поведение идентично, абсолютная дельта — разные blend-стадии). Выход PNG проверен внешней метрикой: 122.0.
+- book1 (негативный контроль): pre=125.6 → final=103.6 → **НЕ сработал** — как в Python (ratio 1.08 < 1.25), резкость текста цела.
+
+**Артефакты:** `Temp/chain_bo_check.log`, `Temp/run_chain_bo_check.ps1`, `Data/RealScan/1821146u_descreened.png`, `Data/RealScan/book1_descreened.png`.
+
+**Следующий шаг:** 2.26 sharp-восстановление Pack/M(2) (панель run27 — без unsharp; adaptive_unsharp уже принят в цепочку ранее).
+
+---
+
 ## 2026-10-10 — 2.25 FiLM-backoff → gated backoff коррекции: 1821146u вылечен
 
 **Контекст:** лечение регресса 1821146u (сеть добавляет растр: top4 113.5→182.1). Проверены три механизма:

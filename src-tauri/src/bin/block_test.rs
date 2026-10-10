@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{conv2d, Conv2dConfig, Module, VarBuilder};
 
-include!("spectral_block_impl.rs");
+include!("../inc/spectral_block_impl.rs");
 
 fn read_safetensors(path: &str) -> Result<std::collections::HashMap<String, Tensor>, Box<dyn std::error::Error>> {
     let buf = std::fs::read(path)?;
