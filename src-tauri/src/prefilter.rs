@@ -375,6 +375,45 @@ pub fn build_notch_lists(img: &Array3<f32>, cfg: &PrefilterCfg, roi: usize) -> V
         .collect()
 }
 
+/// Замер A0 для FiLM-cond (порт `ml/preproc/spectrum.py::estimate_raster`):
+/// один центральный ROI `roi×roi`, tophat-контраст, те же peaks, что и в
+/// `build_notch_lists`; confidence — запас фундаментали над порогом.
+pub struct RasterEstimate {
+    pub r: f32,
+    pub angle_deg: f32,
+    pub confidence: f32,
+}
+
+pub fn estimate_raster(gray: &Array2<f32>, cfg: &PrefilterCfg, roi: usize) -> RasterEstimate {
+    let (h, w) = (gray.shape()[0], gray.shape()[1]);
+    let s = roi.min(h).min(w);
+    let y0 = h / 2 - s / 2;
+    let x0 = w / 2 - s / 2;
+    let mut v = vec![0.0f32; s * s];
+    for y in 0..s {
+        for x in 0..s {
+            v[y * s + x] = gray[[y0 + y, x0 + x]];
+        }
+    }
+    let mean = v.iter().sum::<f32>() / v.len() as f32;
+    for val in v.iter_mut() {
+        *val -= mean;
+    }
+    let raw = fft2_forward(&v, s);
+    let lm = logmag_shifted(&raw, s);
+    let bg = box_blur(&lm, s, cfg.tophat_win);
+    let diff: Vec<f32> = lm.iter().zip(bg.iter()).map(|(a, b)| (a - b).max(0.0)).collect();
+    let (peaks, thr) = detect_peaks(&diff, s, cfg);
+    match peaks.first() {
+        None => RasterEstimate { r: 0.0, angle_deg: 0.0, confidence: 0.0 },
+        Some(f) => RasterEstimate {
+            r: f.r,
+            angle_deg: f.angle_deg,
+            confidence: ((f.strength - thr) / (thr * 5.0 + 1e-12)).clamp(0.0, 1.0),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Butterworth notch machinery (v3.7 formula, r units)
 // ---------------------------------------------------------------------------
@@ -454,6 +493,125 @@ fn apply_mask_patch(patch: &mut [f32], n: usize, mask: &[f32]) {
     }
     fft2_inverse(&mut buf, n);
     for (v, b) in patch.iter_mut().zip(buf.iter()) {
+        *v = b.re + mean;
+    }
+}
+
+/// Rectangular (h×w) forward FFT: rows (length w) then columns (length h).
+fn fft2_forward_rect(gray: &[f32], h: usize, w: usize) -> Vec<Complex32> {
+    let mut planner = FftPlanner::<f32>::new();
+    let fft_w = planner.plan_fft_forward(w);
+    let fft_h = planner.plan_fft_forward(h);
+    let mut buf: Vec<Complex32> = gray.iter().map(|&v| Complex32::new(v, 0.0)).collect();
+    for r in 0..h {
+        fft_w.process(&mut buf[r * w..(r + 1) * w]);
+    }
+    let mut col = vec![Complex32::new(0.0, 0.0); h];
+    for c in 0..w {
+        for r in 0..h {
+            col[r] = buf[r * w + c];
+        }
+        fft_h.process(&mut col);
+        for r in 0..h {
+            buf[r * w + c] = col[r];
+        }
+    }
+    buf
+}
+
+fn fft2_inverse_rect(buf: &mut [Complex32], h: usize, w: usize) {
+    let mut planner = FftPlanner::<f32>::new();
+    let fft_w = planner.plan_fft_inverse(w);
+    let fft_h = planner.plan_fft_inverse(h);
+    let sw = 1.0 / w as f32;
+    let sh = 1.0 / h as f32;
+    for r in 0..h {
+        let row = &mut buf[r * w..(r + 1) * w];
+        fft_w.process(row);
+        for v in row.iter_mut() {
+            *v *= sw;
+        }
+    }
+    let mut col = vec![Complex32::new(0.0, 0.0); h];
+    for c in 0..w {
+        for r in 0..h {
+            col[r] = buf[r * w + c];
+        }
+        fft_h.process(&mut col);
+        for r in 0..h {
+            buf[r * w + c] = col[r] * sh;
+        }
+    }
+}
+
+/// Mask on the true h×w shifted spectrum (numpy `notch_mask(h, w, ...)`).
+fn notch_mask_rect(
+    h: usize,
+    w: usize,
+    peaks: &[(f32, f32)],
+    radius_r: f32,
+    order: i32,
+    gaussian: bool,
+) -> Vec<f32> {
+    let (hh, hw) = (h as f32 / 2.0, w as f32 / 2.0);
+    let sigma = radius_r / (2.0 * 2.0f32.ln()).sqrt();
+    let dirs: Vec<(f32, f32)> = peaks
+        .iter()
+        .map(|&(_, ang)| {
+            let a = ang.to_radians();
+            (a.cos(), a.sin())
+        })
+        .collect();
+    let mut mask = vec![1.0f32; h * w];
+    for y in 0..h {
+        let fy = (y as f32 - hh) / h as f32;
+        for x in 0..w {
+            let fx = (x as f32 - hw) / w as f32;
+            let mut m = 1.0f32;
+            for (&(r, _), &(ax, ay)) in peaks.iter().zip(dirs.iter()) {
+                for sgn in [1.0f32, -1.0] {
+                    let dx = fx - sgn * r * ax;
+                    let dy = fy - sgn * r * ay;
+                    let d = (dx * dx + dy * dy).sqrt().max(1e-9);
+                    let hh_ = if gaussian {
+                        1.0 - (-d * d / (2.0 * sigma * sigma)).exp()
+                    } else {
+                        let q = radius_r / d;
+                        1.0 / (1.0 + q.powi(2 * order))
+                    };
+                    m *= hh_;
+                }
+            }
+            mask[y * w + x] = m;
+        }
+    }
+    mask
+}
+
+fn apply_mask_rect(plane: &mut [f32], h: usize, w: usize, mask: &[f32]) {
+    let mean: f32 = plane.iter().sum::<f32>() / plane.len() as f32;
+    for v in plane.iter_mut() {
+        *v -= mean;
+    }
+    let mut buf = fft2_forward_rect(plane, h, w);
+    let (ch, cw) = (h / 2, w / 2);
+    let mut sh = vec![Complex32::new(0.0, 0.0); h * w];
+    for y in 0..h {
+        for x in 0..w {
+            sh[y * w + x] = buf[((y + ch) % h) * w + (x + cw) % w];
+        }
+    }
+    for (b, m) in sh.iter_mut().zip(mask.iter()) {
+        *b *= *m;
+    }
+    let (uh, uw) = ((h + 1) / 2, (w + 1) / 2);
+    for y in 0..h {
+        for x in 0..w {
+            buf[y * w + x] = sh[((y + uh) % h) * w + (x + uw) % w];
+        }
+    }
+    fft2_inverse_rect(&mut buf, h, w);
+    for (v, b) in plane.iter_mut().zip(buf.iter()) {
         *v = b.re + mean;
     }
 }
@@ -690,29 +848,22 @@ pub fn subtract_lf(img: &Array3<f32>, bands: &[LFBand], cfg: &PrefilterCfg) -> A
     }
     let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
     let peaks: Vec<(f32, f32)> = bands.iter().map(|b| (b.r, b.angle_deg)).collect();
-    let mask = notch_mask(h.max(w), &peaks, cfg.lf_notch_r, cfg.lf_notch_order, false);
-    // NOTE: square mask sized max(h,w); applied on a square canvas then cropped.
-    let n = h.max(w);
+    // NOTE: notch on the true h×w spectrum. An earlier port padded to a square
+    // canvas with replicate edges; the padding seam produced a wrap-around lobe
+    // at the left/right frame borders (Pack parity vs Python, JOURNAL 2.28).
+    let mask = notch_mask_rect(h, w, &peaks, cfg.lf_notch_r, cfg.lf_notch_order, false);
     let mut out = img.clone();
     for ch in 0..c {
-        let mut sq = vec![0.0f32; n * n];
+        let mut plane = vec![0.0f32; h * w];
         for y in 0..h {
             for x in 0..w {
-                sq[y * n + x] = img[[ch, y, x]];
+                plane[y * w + x] = img[[ch, y, x]];
             }
         }
-        // replicate-pad remainder
-        for y in 0..n {
-            for x in 0..n {
-                if y >= h || x >= w {
-                    sq[y * n + x] = img[[ch, y.min(h - 1), x.min(w - 1)]];
-                }
-            }
-        }
-        apply_mask_patch(&mut sq, n, &mask);
+        apply_mask_rect(&mut plane, h, w, &mask);
         for y in 0..h {
             for x in 0..w {
-                out[[ch, y, x]] = sq[y * n + x];
+                out[[ch, y, x]] = plane[y * w + x];
             }
         }
     }
@@ -1195,6 +1346,20 @@ mod tests {
             assert!((a - b.re).abs() < 1e-3, "roundtrip diverged");
             assert!(b.im.abs() < 1e-3);
         }
+    }
+
+    #[test]
+    fn estimate_raster_finds_grating() {
+        let n = 512usize;
+        let g = Array2::from_shape_fn((n, n), |(_, x)| {
+            0.5 + 0.1 * (2.0 * PI * 0.15 * x as f32).cos()
+        });
+        let cfg = PrefilterCfg::default();
+        let est = estimate_raster(&g, &cfg, 1024); // roi клэмпится к 512
+        assert!((est.r - 0.15).abs() < 0.01, "r={}", est.r);
+        let ang = est.angle_deg.rem_euclid(180.0);
+        assert!(ang < 10.0 || ang > 170.0, "ang={}", est.angle_deg);
+        assert!(est.confidence > 0.5, "conf={}", est.confidence);
     }
 
     #[test]

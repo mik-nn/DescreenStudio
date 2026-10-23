@@ -7,6 +7,7 @@ use image::ImageEncoder;
 use rustfft::num_complex::Complex32;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use crate::candle_engine::CandleEngine;
 use crate::inference::{Ep, InferenceEngine, TileParams};
 use crate::prefilter::{
     adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, linear_tone, luma_of,
@@ -14,7 +15,51 @@ use crate::prefilter::{
 };
 use crate::runtime;
 
-pub struct AppState(pub Mutex<Option<InferenceEngine>>);
+/// Движок инференса: Candle (safetensors + FiLM, основной) или
+/// ort/DirectML (run3-era fallback, JOURNAL 2026-09-21 «ONNX закрыт»).
+pub enum Engine {
+    Ort(InferenceEngine),
+    Candle(CandleEngine),
+}
+
+impl Engine {
+    pub fn set_cond(&mut self, cond: Option<[f32; 4]>) {
+        if let Engine::Candle(e) = self {
+            e.set_cond(cond);
+        }
+    }
+
+    pub fn descreen_progress(
+        &mut self,
+        img: &ndarray::Array3<f32>,
+        tp: TileParams,
+        on_tile: &mut dyn FnMut(usize, usize),
+    ) -> Result<ndarray::Array3<f32>, Box<dyn std::error::Error>> {
+        match self {
+            Engine::Ort(e) => e.descreen_progress(img, tp, on_tile),
+            Engine::Candle(e) => e.descreen_progress(img, tp, on_tile),
+        }
+    }
+
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Engine::Ort(_) => "ort",
+            Engine::Candle(_) => "candle",
+        }
+    }
+
+    /// Прогон без прогресса (бенчи).
+    pub fn descreen(
+        &mut self,
+        img: &ndarray::Array3<f32>,
+        tp: TileParams,
+    ) -> Result<ndarray::Array3<f32>, Box<dyn std::error::Error>> {
+        let mut noop = |_d: usize, _t: usize| {};
+        self.descreen_progress(img, tp, &mut noop)
+    }
+}
+
+pub struct AppState(pub Mutex<Option<Engine>>);
 
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct ProgressPayload {
@@ -156,7 +201,7 @@ pub(crate) fn spectrum_data_url(path: &Path) -> Result<PreviewOut, String> {
 /// -> tiled inference -> AI-blend mix (anchor: prefiltered) -> paper-background
 /// return -> linear tone match -> save `<stem>_descreened.png` next to input.
 pub fn descreen_file(
-    engine: &mut InferenceEngine,
+    engine: &mut Engine,
     in_path: &Path,
     blend: f32,
     tp: TileParams,
@@ -175,6 +220,22 @@ pub fn descreen_file(
     // Classical prefilter unloads the net: measured screen + LF banding gone,
     // the net owns detail only.
     let pcfg = PrefilterCfg::default();
+    // A0-замер на исходнике (до префильтра) — cond для FiLM-run27_hyb;
+    // паритет с eval_realscan.py:140-166. Для ort/run3 cond игнорируется.
+    let est = crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024);
+    let cond = crate::candle_engine::build_cond_vec(est.r, est.angle_deg, est.confidence);
+    eprintln!(
+        "[stage] A0: r={:.4} ang={:.1} conf={:.3} cond=[{:.3},{:.3},{:.3},{:.3}] engine={}",
+        est.r,
+        est.angle_deg,
+        est.confidence,
+        cond[0],
+        cond[1],
+        cond[2],
+        cond[3],
+        engine.describe()
+    );
+    engine.set_cond(Some(cond));
     let t00 = Instant::now();
     let peaks = build_notch_lists(&img, &pcfg, 1024);
     let t_measure = t00.elapsed();
@@ -189,6 +250,23 @@ pub fn descreen_file(
     let t00 = Instant::now();
     let pre = adaptive_notch(&img, &peaks, &pcfg);
     let t_notch = t00.elapsed();
+    if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+        // intermediate dump: notch stage output (border coverage diagnostics)
+        let dbg_path = in_path.with_file_name(format!(
+            "{}_dbg_notch.png",
+            in_path.file_stem().and_then(|s| s.to_str()).unwrap_or("scan")
+        ));
+        let mut dbg_img = image::RgbImage::new(w, h);
+        for y in 0..hu {
+            for x in 0..wu {
+                let p = dbg_img.get_pixel_mut(x as u32, y as u32);
+                for ch in 0..3 {
+                    p[ch] = (pre[[ch, y, x]].clamp(0.0, 1.0) * 255.0).round() as u8;
+                }
+            }
+        }
+        let _ = dbg_img.save(&dbg_path);
+    }
     let bands = detect_lf_bands(&luma_of(&pre), &pcfg);
     let t00 = Instant::now();
     let pre = subtract_lf(&pre, &bands, &pcfg);
@@ -196,6 +274,15 @@ pub fn descreen_file(
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         use crate::prefilter::{luma_of as _luma2, screen_band_energy as _sbe2};
         eprintln!("[stage] lf bands: {}", bands.len());
+        if !bands.is_empty() {
+            eprintln!(
+                "[stage] lf peaks: {:?}",
+                bands
+                    .iter()
+                    .map(|b| (b.r, b.angle_deg))
+                    .collect::<Vec<(f32, f32)>>()
+            );
+        }
         eprintln!("[stage] pre bandE={:.4}", _sbe2(&_luma2(&pre), 0.12, 0.18));
         // debug dump of the prefilter output next to the input
         let dbg_path = in_path.with_file_name(format!(
@@ -338,7 +425,7 @@ pub fn descreen_file(
     })
 }
 
-fn ensure_engine(state: &State<'_, AppState>, app: &AppHandle) -> Result<InferenceEngine, String> {
+fn ensure_engine(state: &State<'_, AppState>, app: &AppHandle) -> Result<Engine, String> {
     let taken = state
         .0
         .lock()
@@ -349,6 +436,18 @@ fn ensure_engine(state: &State<'_, AppState>, app: &AppHandle) -> Result<Inferen
         None => {
             runtime::prepare_runtime().map_err(|e| e.to_string())?;
             let res_base = app.path().resource_dir().ok();
+            // Основной путь — Candle на safetensors (run27_hyb + FiLM, CUDA);
+            // DESCREEN_ENGINE=ort — форс fallback-ветки (run3 ONNX/DirectML).
+            let force_ort = std::env::var("DESCREEN_ENGINE").as_deref() == Ok("ort");
+            if !force_ort {
+                if let Ok(model) = runtime::resolve_safetensors(res_base.clone()) {
+                    let name = model.to_string_lossy().into_owned();
+                    match CandleEngine::new(&name) {
+                        Ok(e) => return Ok(Engine::Candle(e)),
+                        Err(err) => eprintln!("candle init failed ({err}), falling back to ort"),
+                    }
+                }
+            }
             let model = runtime::resolve_model(res_base).map_err(|e| e.to_string())?;
             let name = model.to_string_lossy().into_owned();
             InferenceEngine::new(&name, Ep::DirectML)
@@ -356,6 +455,7 @@ fn ensure_engine(state: &State<'_, AppState>, app: &AppHandle) -> Result<Inferen
                     eprintln!("DirectML session failed ({e}), falling back to CPU");
                     InferenceEngine::new(&name, Ep::Cpu)
                 })
+                .map(Engine::Ort)
                 .map_err(|e| format!("session init failed: {e}"))
         }
     }
@@ -467,8 +567,8 @@ mod tests {
 
         runtime::prepare_runtime().unwrap();
         let model = runtime::resolve_model(None).unwrap();
-        let mut eng =
-            InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
+        let eng = InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
+        let mut eng = Engine::Ort(eng);
         let dir = std::env::temp_dir().join("descreen_chain_test");
         std::fs::create_dir_all(&dir).unwrap();
         // synthetic AM print: gradient content + two screen gratings (r=0.15)
@@ -528,8 +628,8 @@ mod tests {
     fn stage5_pipeline_end_to_end() {
         runtime::prepare_runtime().unwrap();
         let model = runtime::resolve_model(None).unwrap();
-        let mut eng =
-            InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
+        let eng = InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
+        let mut eng = Engine::Ort(eng);
         let dir = std::env::temp_dir().join("descreen_stage5_test");
         std::fs::create_dir_all(&dir).unwrap();
         let inp = tiny_png(&dir);

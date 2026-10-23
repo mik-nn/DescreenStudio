@@ -2,7 +2,7 @@
 
 Статусы и правила — см. `WORKFLOW.md`. Нумерация этапов соответствует `ImplementationPlan.md`.
 
-**Текущий фокус:** **run27_hyb — ЭТАЛОН** + gated backoff (2.25/2.25б) + adaptive_unsharp в приёмке (2.26, порт в Rust) + **Найквист-режим бенча (2.27): 11/11 ≤4 мин, суммарно 20.1 мин, sharp в коридоре на 10/11** + adaptive blend-fallback. Дальше: интеграция Найквист-режима в продукт, разбор Pack/BookCOver либо Candle-продукт (safetensors эталона → candle, Этап 3 плана; ONNX закрыт).
+**Текущий фокус:** **Candle-продукт (2.28) — DONE**: `run27_hyb` в safetensors + FiLM-cond (A0 на входе) грузится в Rust/Candle, `descreen_file` по умолчанию идёт через candle (ort — fallback по `DESCREEN_ENGINE=ort`); паритет с Python-эталоном по этапам проверен (pre 0.3%, net = квантование PNG, финал 0.4–0.9%, backoff-решения совпадают). До этого: run27_hyb-эталон + gated backoff (2.25) + adaptive_unsharp в приёмке (2.26) + **Найквист-режим бенча (2.27): 11/11 ≤4 мин, суммарно 20.1 мин, sharp в коридоре на 10/11**. Дальше: интеграция Найквист-режима в продукт, разбор Pack/BookCOver, замер скорости candle на свободном GPU.
 
 ## Этап 1. Dataset Pipeline
 
@@ -41,6 +41,7 @@
 |---|---|---|---|
 | 3.1 | Экспорт с динамическими осями + FP16 | DONE (fp32, dyn-оси W/H/batch через Dim(16..16384); обрат. DFT — полный эрмитов спектр в реальной области, без inverse+onesided; ΔPSNR +0.001/SSIM=0.9261 на val; FP16 — только TensorRT EP) | `fourier_descreen_unet.onnx` грузится в строгих GPU EP |
 | 3.2 | Оптимизация графа + GPU-путь инференса | DONE (opt_level=99: 482→450 узлов, экв. ~1e-7; макс. CPU-латентность неприемлема (512² 4.7с/768² 34с); DirectML EP 512² 2.6с/768² 6.4с, maxdiff 2.6e-6; CUDA 13 недоступен на машине → DML; строгий DML-режим упёрся в shape-опы, роутятся на CPU намеренно ORT — benign) | `fourier_descreen_unet.opt.onnx` (~40 MiB) работает в DML |
+| 3.3 | Candle-инференс `run27_hyb` в продукте: safetensors + FiLM-cond (A0), тайлинг/батч, `Engine`-абстракция | DONE (2.28: `candle_model.rs` (UNet+FiLM, авто-детект film), `candle_engine.rs` (CUDA→CPU, batch 4, тайлинг 1:1 с ort), `estimate_raster`+`build_cond_vec` в Rust, `Engine{Ort,Candle}`, `DESCREEN_ENGINE`/`DESCREEN_MODEL`/`DESCREEN_BATCH`/`DESCREEN_DEVICE`; 88 тензоров 39.9 MB; cargo test 13/13; паритет: pre 0.32%/0.25%, net 0.09% (=квантование PNG), финал 0.43%/0.88% mean\|d\|, sharp/dE равны, top4 не хуже; LF-баг квадратного полотна исправлен) | `descreen_file` по умолчанию candle; паритет с Python |
 
 ## Этап 4. Rust/Tauri Backend
 

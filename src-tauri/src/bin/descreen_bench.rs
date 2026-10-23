@@ -5,6 +5,8 @@ use std::time::Instant;
 use ndarray::{Array3, Array4, s};
 use ndarray::prelude::*;
 
+use descreen_studio::app::Engine;
+use descreen_studio::candle_engine::CandleEngine;
 use descreen_studio::{runtime, Ep, InferenceEngine, TileParams};
 
 /// Загрузка PNG/JPG в [3, H, W] f32 [0, 1].
@@ -70,6 +72,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut dump_dir: Option<String> = None;
     let mut chain_in: Option<String> = None;
     let mut chain_blend = 1.0f32;
+    let mut engine_kind = String::from("ort");
     let mut image_in: Option<String> = None;
     let mut out_path: Option<String> = None;
     let args: Vec<String> = env::args().collect();
@@ -85,6 +88,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "--probe" => { i += 1; probe = args[i].parse()?; }
             "--chain" => { i += 1; chain_in = Some(args[i].clone()); }
             "--blend" => { i += 1; chain_blend = args[i].parse()?; }
+            "--engine" => { i += 1; engine_kind = args[i].clone(); }
             "--dump" => { i += 1; dump_dir = Some(args[i].clone()); }
             "--image" => { i += 1; image_in = Some(args[i].clone()); }
             "--out" => { i += 1; out_path = Some(args[i].clone()); }
@@ -102,9 +106,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         i += 1;
     }
 
-    let mut engine = InferenceEngine::new(&model, ep)?;
-    println!("model: {model}");
-    println!("ep requested: {:?}", engine.ep());
+    if engine_kind == "candle" && (probe > 0 || verify) {
+        return Err("--probe/--verify требуют --engine ort".into());
+    }
+    let mut engine = match engine_kind.as_str() {
+        "candle" => {
+            let m = runtime::resolve_safetensors(None)?;
+            println!("model: {}", m.display());
+            Engine::Candle(CandleEngine::new(&m.to_string_lossy())?)
+        }
+        "ort" => {
+            let e = InferenceEngine::new(&model, ep)?;
+            println!("model: {model}");
+            println!("ep requested: {:?}", e.ep());
+            Engine::Ort(e)
+        }
+        other => return Err(format!("unknown engine {other}").into()),
+    };
 
     // Headless full-chain check on a real file (prefilter + inference),
     // mirrors the Tauri run_descreen command. Saves <stem>_descreened.png.
@@ -212,6 +230,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if probe > 0 {
         // Diagnose nondeterminism / slice-vs-array input differences of the
         // engine on identical content.
+        let Engine::Ort(e) = &mut engine else { unreachable!("--probe требует --engine ort") };
         let full4 = Array4::from_shape_vec((1, 3, h_px, w_px), img.iter().copied().collect())?;
         let mut padded = Array4::<f32>::zeros((1, 3, h_px, w_px));
         {
@@ -230,7 +249,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .enumerate()
         {
             let t1 = Instant::now();
-            let fout = engine.process_tile(&arr)?;
+            let fout = e.process_tile(&arr)?;
             let f3 = fout.index_axis(Axis(0), 0).to_owned();
             let mn = f3.index_axis(Axis(1), 0).mean().unwrap();
             let secs = t1.elapsed().as_secs_f64();
@@ -252,9 +271,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     if verify {
+        let Engine::Ort(e) = &mut engine else { unreachable!("--verify требует --engine ort") };
         let full4 = Array4::from_shape_vec((1, 3, h_px, w_px), img.iter().copied().collect())?;
         let t1 = Instant::now();
-        let fout = engine.process_tile(&full4)?;
+        let fout = e.process_tile(&full4)?;
         println!("full-image single-pass: {:.2}s", t1.elapsed().as_secs_f64());
         let f3 = fout.index_axis(Axis(0), 0);
         if let Some(dir) = dump {

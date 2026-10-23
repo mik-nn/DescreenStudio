@@ -154,13 +154,13 @@ impl InferenceEngine {
     }
 }
 
-fn array2_zeros(h: usize, w: usize) -> Array3<f32> {
+pub(crate) fn array2_zeros(h: usize, w: usize) -> Array3<f32> {
     Array3::<f32>::zeros((1, h, w))
 }
 
 /// Replicate edge rows/cols of padded [1, C, ph, pw] that were left zero so the
 /// whole padded tensor is a replicate-border extension of [0..h, 0..w).
-fn pad_replicate_edges(arr: &mut Array4<f32>, h: usize, w: usize) {
+pub(crate) fn pad_replicate_edges(arr: &mut Array4<f32>, h: usize, w: usize) {
     let (c, ph, pw) = (arr.shape()[1], arr.shape()[2], arr.shape()[3]);
     let n = *arr.shape().first().unwrap();
     for b in 0..n {
@@ -179,7 +179,7 @@ fn pad_replicate_edges(arr: &mut Array4<f32>, h: usize, w: usize) {
 }
 
 /// Weighted accumulate of one output tile with its separable Hann window.
-fn accumulate(acc: &mut Array3<f32>, out: &ndarray::ArrayView3<f32>, weight: &mut Array3<f32>, y0: usize, x0: usize, tile: usize) {
+pub(crate) fn accumulate(acc: &mut Array3<f32>, out: &ndarray::ArrayView3<f32>, weight: &mut Array3<f32>, y0: usize, x0: usize, tile: usize) {
     // Hann window, 1-D, period length tile (matches v3.7 export path).
     let win1d: Vec<f32> = (0..tile)
         .map(|i| {

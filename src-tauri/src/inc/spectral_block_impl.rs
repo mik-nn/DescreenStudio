@@ -66,94 +66,98 @@ impl Fft2 {
         })
     }
 
-    /// Умножение слева на [h, h]-матрицу для [1, c, h, l]: y[iy] = Σ_ky M[iy,ky] x[ky].
+    /// Умножение слева на [h, h]-матрицу для [b, c, h, l]: y[iy] = Σ_ky M[iy,ky] x[ky].
     fn left_m(&self, x: &Tensor, m_left: &Tensor) -> Result<Tensor, candle_core::Error> {
         let (b, c, h, l) = x.dims4()?;
+        let bc = b * c; // FFT независим по батчу: сворачиваем b в каналы
         let xh = x
-            .reshape((c, h, l))?
+            .reshape((bc, h, l))?
             .permute((1, 0, 2))?
             .contiguous()?
-            .reshape((h, c * l))?;
-        let y = m_left.matmul(&xh)?; // [h, c*l]
-        y.reshape((h, c, l))?
+            .reshape((h, bc * l))?;
+        let y = m_left.matmul(&xh)?; // [h, bc*l]
+        y.reshape((h, bc, l))?
             .permute((1, 0, 2))?
             .contiguous()?
             .reshape((b, c, h, l))
     }
 
-    /// Умножение справа на [l, l]-матрицу для [1, c, h, l].
+    /// Умножение справа на [l, l]-матрицу для [b, c, h, l].
     fn right_m(&self, x: &Tensor, m_right: &Tensor) -> Result<Tensor, candle_core::Error> {
         let (b, c, h, l) = x.dims4()?;
+        let bc = b * c;
         let xl = x
-            .reshape((c, h, l))?
-            .reshape((c * h, l))?
+            .reshape((bc, h, l))?
+            .reshape((bc * h, l))?
             .contiguous()?;
-        let y = xl.matmul(m_right)?; // [c*h, l]
+        let y = xl.matmul(m_right)?; // [bc*h, l]
         y.reshape((b, c, h, l))
     }
 
-    /// fft2: [1, c, h, w] (real) -> (re, im) [1, c, h, w]
+    /// fft2: [b, c, h, w] (real) -> (re, im) [b, c, h, w]
     fn fft2(&self, x: &Tensor) -> Result<(Tensor, Tensor), candle_core::Error> {
         let (b, c, h, w) = x.dims4()?;
-        // Сторона H: [c, h, w] -> [h, c*w], левый матmul F[h,h].
+        let bc = b * c; // FFT независим по батчу: сворачиваем b в каналы
+        // Сторона H: [bc, h, w] -> [h, bc*w], левый матmul F[h,h].
         let xh = x
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .permute((1, 0, 2))?
             .contiguous()?
-            .reshape((h, c * w))?;
-        let p = self.fr_h.matmul(&xh)?; // [h, c*w]
+            .reshape((h, bc * w))?;
+        let p = self.fr_h.matmul(&xh)?; // [h, bc*w]
         let q = self.fi_h.matmul(&xh)?;
-        // Сторона W: [h, c, w] -> [c*h, w], правый матmul F[w,w].
+        // Сторона W: [h, bc, w] -> [bc*h, w], правый матmul F[w,w].
         let side = |m: &Tensor| -> Result<Tensor, candle_core::Error> {
             Ok(m
-                .reshape((h, c, w))?
+                .reshape((h, bc, w))?
                 .permute((1, 0, 2))?
                 .contiguous()?
-                .reshape((c * h, w))?)
+                .reshape((bc * h, w))?)
         };
-        let p = side(&p)?; // [c*h, w]
+        let p = side(&p)?; // [bc*h, w]
         let q = side(&q)?;
         let re = p
             .matmul(&self.fr_w)?
             .sub(&q.matmul(&self.fi_w)?)?
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .reshape((b, c, h, w))?;
         let im = p
             .matmul(&self.fi_w)?
             .add(&q.matmul(&self.fr_w)?)?
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .reshape((b, c, h, w))?;
         Ok((re, im))
     }
 
-    /// ifft2 -> действительная часть [1, c, h, w]
+    /// ifft2 -> действительная часть [b, c, h, w]
     fn ifft2_re(&self, re: &Tensor, im: &Tensor) -> Result<Tensor, candle_core::Error> {
         let (b, c, h, w) = re.dims4()?;
+        let bc = b * c;
         let rh = re
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .permute((1, 0, 2))?
             .contiguous()?
-            .reshape((h, c * w))?;
+            .reshape((h, bc * w))?;
         let ih = im
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .permute((1, 0, 2))?
             .contiguous()?
-            .reshape((h, c * w))?;
-        let p = self.gr_h.matmul(&rh)?.sub(&self.gi_h.matmul(&ih)?)?; // [h, c*w]
+            .reshape((h, bc * w))?;
+        let p = self.gr_h.matmul(&rh)?.sub(&self.gi_h.matmul(&ih)?)?; // [h, bc*w]
         let q = self.gi_h.matmul(&rh)?.add(&self.gr_h.matmul(&ih)?)?;
         let side = |m: &Tensor| -> Result<Tensor, candle_core::Error> {
             Ok(m
-                .reshape((h, c, w))?
+                .reshape((h, bc, w))?
                 .permute((1, 0, 2))?
                 .contiguous()?
-                .reshape((c * h, w))?)
+                .reshape((bc * h, w))?)
         };
         let p = side(&p)?;
         let q = side(&q)?;
         // Действительная часть: (P - iQ)(Gr + iGw) -> re = P Gr - Q Gi
         p.matmul(&self.gr_w)?
             .sub(&q.matmul(&self.gi_w)?)?
-            .reshape((c, h, w))?
+            .reshape((bc, h, w))?
             .reshape((b, c, h, w))
     }
 }

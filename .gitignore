@@ -93,4 +93,5 @@ ml/simulator/_preview/
 ml/simulator/_preview2/
 ml/simulator/_scan/
 src-tauri/model*.onnx
+src-tauri/*.safetensors
 src-tauri/gen/

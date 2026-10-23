@@ -4,6 +4,38 @@
 
 ---
 
+## 2026-10-23 — 2.28 DONE: Candle-продукт run27_hyb (safetensors + FiLM-cond), паритет с Python по этапам, фикс LF-полотна
+
+**Запрошено:** подключить Candle-движок с весами `run27_hyb` в продукт (`descreen_file`) вместо ort, проверить паритет с Python-эталоном и скорость.
+
+**Сделано:**
+1. **Веса:** `ml/benchmark/convert_to_safetensors.py` → `ml/train/_run27_hyb/best.safetensors` (**88 тензоров, 39.9 MB**), ключи `film.mlp.0/2.*` на месте; рабочая копия `src-tauri/descreen.safetensors` (в `.gitignore`: `src-tauri/*.safetensors`).
+2. **`src-tauri/src/candle_model.rs`:** порт FourierUNet из `candle_bench` в библиотеку + `FiLM` (`ml/model/film.py`: `[min(r/0.65,1.5), min(conf,1), cos, sin]` → Linear(4,32)→GELU(erf)→Linear(32,768), zero-init), `load()` авто-детектит film-ключи, `forward_cond` с CANDLE_DUMP-статистикой, `impl Module`.
+3. **`src-tauri/src/candle_engine.rs`:** `CandleEngine` — CUDA→CPU fallback (`DESCREEN_DEVICE=cpu` — форс), `DESCREEN_BATCH` (default 4), тайлинг 1:1 с ort (grid/ceil, replicate-pad, chunks, Hann-accumulate), `build_cond_vec`, `COND_R_MAX=0.65`.
+4. **Батч-фикс:** `SpectralBlockComplex` падал при b>1 (`reshape((c,h,w))`) — свёртка батча в каналы (`bc=b*c`) в `fft2/ifft2_re/left_m/right_m`. **Исправление прежней записи:** батч-бенч 1/4/8 в 2.23 никогда не запускался (был отложен), т.е. регрессия не была зафиксирована.
+5. **A0→cond в Rust:** `prefilter::estimate_raster` (порт `spectrum.estimate_raster`, ROI 1024 на исходнике до префильтра, confidence = `clip((s−thr)/(thr·5+1e−12))`) + `build_cond_vec`; `descreen_file` печатает `[stage] A0: ... cond=[...]`.
+6. **`Engine{Ort,Candle}`** в `app.rs`: `set_cond/descreen_progress/describe`, `ensure_engine` — candle при наличии safetensors, `DESCREEN_ENGINE=ort` — форс ort (DML→CPU), ошибка candle → лог + ort-fallback; `runtime::resolve_safetensors` (`DESCREEN_MODEL` → resource → exe → manifest).
+7. **`descreen_bench --engine candle|ort`**, `candle_bench --cond` и lib-модель; попутный фикс `candle_bench` (стопка тайлов давала ранг 5 — `.squeeze(0)`).
+
+**Паритет (полный chain, blend 1.0, `DESCREEN_NO_UNSHARP=1`; Python `eval_realscan.py --unsharp 0 --backoff gated`):**
+- **A0:** 1821146u r=0.1485/conf=0.489 (Python 0.1485/0.49); Pack 0.1447/164.7°/0.488 (Python 0.1447/164.7/0.49). Угол зеркального пика может отличаться на 180° (45.3° vs −134.7° у 1821146u) — эффект на выход измерен в torch: **sign-flip cond 0.0011, zero-cond 0.0023 mean|diff|** (FiLM — лёгкая модуляция, run27_hyb к знаку нечувствителен).
+- **Backoff:** решения совпали (1821146u: Python top4 145.2>112.8·1.25 → fired w=0.5; Rust 217.2>114.3·1.25 → fired; Pack — не сработал).
+- **Префильтр:** 1821146u mean|d| 0.0032 (0.8/255), Pack 0.0025; метрики префильтра: resid 30.0 vs 29.2, top4 114.0 vs 112.6, quad 235.8 vs 237.0.
+- **Net-этап изолированно** (crop 1024, одинаковый вход, torch npy vs candle PNG8): **0.0009 = ровно квантование PNG** (PNG-torch vs npy 0.0009, max 0.002); единственное расхождение — 20 пикселей угла кадра (там окно Ханна ≈0).
+- **Финал:** 1821146u mean|d| 0.0043 / p99 0.0235, sharp 0.500 vs 0.501, dE 3.27 vs 3.25, top4 122.5 vs 108.2; Pack 0.0088 / p99 0.063, sharp 0.430 vs 0.440, **top4 679.4 vs 770.0 и resid 342.7 vs 374.2 — Rust не хуже**, dE 2.87 vs 2.92. Пиксели >0.3 — только углы кадра (58 шт.).
+
+**Найденный и исправленный дефект паритета — LF-этап:** `subtract_lf` применял notch на квадратном полотне `max(h,w)` с replicate-паддингом → шов давал wrap-around «горб» **−0.27 у левого и правого краёв** кадра (~90 px, только по X) на сканах с LF-полосой (найдено на Pack: pre-diff 0.0089, бордер 0.14). Исправлено: прямоугольный FFT h×w (`fft2_forward_rect`/`fft2_inverse_rect`, `notch_mask_rect` по формуле numpy `notch_mask(h,w,...)`, `apply_mask_rect`) — как в `lfband.subtract_lf_rgb`. После фикса: бордер 0.001, Pack pre-diff 0.0089→**0.0023**, chain 1821146u 107.8→100.8 с (LF 7.1→3.1 с).
+
+**Скорость (GPU занят LoRA-тренингом — цифры занижены):** Pack 4844×6335 30.7 Mpx — 138–141 с (net ~109 с / 154 тайла ≈ 0.71 с/тайл при batch 4); 1821146u 5920×3108 18.4 Mpx — 100.8 с (net ~56 с). Ускорение от batch на свободном GPU не подтверждено (замер отложен).
+
+**Тесты:** `cargo test` **13/13** (+`prefilter::estimate_raster_finds_grating`, +`candle_model::batch_matches_single_and_cond_broadcasts` на CPU); `cargo check --all-targets` чистый (единственный warning — cargo hard-link на F:, к коду отношения не имеет).
+
+**Файлы:** `src-tauri/src/{candle_model.rs, candle_engine.rs, app.rs, prefilter.rs, runtime.rs, lib.rs, inc/spectral_block_impl.rs}`, `src-tauri/src/bin/{candle_bench.rs, descreen_bench.rs}`, `ml/benchmark/convert_to_safetensors.py`, `src-tauri/descreen.safetensors`, `Temp/{parity_cmp,py_stages,stage_cmp,pre_diff_map,edge_profile,final_diff_map,net_crop,net_cmp}.py`.
+
+**Следующий шаг:** смоук `--engine ort` (fallback не сломан), Найквист-даунсэмпл в `descreen_file` (продукт), разбор Pack/BookCOver, замер candle на свободном GPU (batch 1/4/8).
+
+---
+
 ## 2026-10-10 — 2.27 Найквист-режим бенча: 11/11 ≤4 мин, unsharp в Rust, adaptive blend-fallback, verify-масштаб
 
 **Контекст:** директива владельца — бенчмарк Rust-цепочки **≤5 мин/картинку** (первичный прогон 40.9 мин неприемлем), обработка и метрики в разрешении Найквиста–Котельникова (период растра = 2 px, масштаб = 2×r), вывод 1200 dpi не нужен. Утверждён порядок: 2 (порт unsharp) → 1 (blend-свип) → 3 (точность оценки растра/масштаба) → JOURNAL + коммит.

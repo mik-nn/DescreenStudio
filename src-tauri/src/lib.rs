@@ -1,4 +1,6 @@
 pub mod app;
+pub mod candle_engine;
+pub mod candle_model;
 pub mod inference;
 pub mod prefilter;
 pub mod runtime;

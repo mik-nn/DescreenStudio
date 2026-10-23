@@ -58,3 +58,29 @@ pub fn resolve_model(extra_base: Option<PathBuf>) -> Result<PathBuf, Box<dyn Err
         .find(|p| p.exists())
         .ok_or_else(|| "model.opt.onnx not found (resource / exe / manifest dirs)".into())
 }
+
+/// Locate `descreen.safetensors` — основные веса Candle (run27_hyb + FiLM):
+/// `DESCREEN_MODEL` (env, только .safetensors) -> resource dir -> exe dir ->
+/// manifest dir (dev: файл лежит в `src-tauri/`, gitignored).
+pub fn resolve_safetensors(extra_base: Option<PathBuf>) -> Result<PathBuf, Box<dyn Error>> {
+    let mut cands = Vec::new();
+    if let Ok(m) = std::env::var("DESCREEN_MODEL") {
+        let p = PathBuf::from(m);
+        if p.extension().is_some_and(|e| e == "safetensors") {
+            cands.push(p);
+        }
+    }
+    if let Some(b) = extra_base {
+        cands.push(b.join("descreen.safetensors"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            cands.push(d.join("descreen.safetensors"));
+        }
+    }
+    cands.push(manifest_dir().join("descreen.safetensors"));
+    cands
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| "descreen.safetensors not found (env / resource / exe / manifest)".into())
+}
