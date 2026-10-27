@@ -90,7 +90,17 @@ pub struct DescreenCore {
 }
 
 fn load_rgb(path: &Path) -> Result<image::RgbImage, String> {
-    image::open(path)
+    // TIFF от МФУ до ~10000 px: дефолтный лимит декодера (~512 MB декод-буферов)
+    // валит Calendar1 (7650×12724); снимаем до 4 GB (сам декод <0.5 GB).
+    let mut limits = image::io::Limits::default();
+    limits.max_alloc = Some(4 * 1024 * 1024 * 1024);
+    let mut reader = image::ImageReader::open(path)
+        .map_err(|e| format!("open failed: {e}"))?
+        .with_guessed_format()
+        .map_err(|e| format!("open failed: {e}"))?;
+    reader.limits(limits);
+    reader
+        .decode()
         .map_err(|e| format!("open failed: {e}"))
         .map(|img| img.to_rgb8())
 }
