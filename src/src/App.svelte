@@ -22,6 +22,7 @@
   }
 
   let aiBlend = $state(0.85);
+  let nyquistMode = $state(false);
   let isProcessing = $state(false);
   let isLoading = $state(false);
   let imagePath = $state<string | null>(null);
@@ -145,6 +146,7 @@
       const res = await invoke<DescreenOut>("run_descreen", {
         path: imagePath,
         blend: aiBlend,
+        nyquist: nyquistMode,
       });
       outputPath = res.output_path;
       const pv = await invoke<PreviewOut>("preview_image", {
@@ -280,6 +282,17 @@
           bind:value={aiBlend}
           class="accent-indigo-500"
         />
+      </label>
+
+      <label class="flex flex-col gap-1 text-xs text-neutral-400">
+        <span class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" bind:checked={nyquistMode} class="accent-indigo-500" />
+          <span
+            title="Приводит период растра к 2 px (Найквист–Котельников), обрабатывает в этом разрешении и возвращает исходный размер"
+          >
+            Найквист-режим (период растра = 2 px)
+          </span>
+        </span>
       </label>
 
       <button

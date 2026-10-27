@@ -2,7 +2,7 @@
 
 Статусы и правила — см. `WORKFLOW.md`. Нумерация этапов соответствует `ImplementationPlan.md`.
 
-**Текущий фокус:** **Candle-продукт (2.28) — DONE**: `run27_hyb` в safetensors + FiLM-cond (A0 на входе) грузится в Rust/Candle, `descreen_file` по умолчанию идёт через candle (ort — fallback по `DESCREEN_ENGINE=ort`); паритет с Python-эталоном по этапам проверен (pre 0.3%, net = квантование PNG, финал 0.4–0.9%, backoff-решения совпадают). До этого: run27_hyb-эталон + gated backoff (2.25) + adaptive_unsharp в приёмке (2.26) + **Найквист-режим бенча (2.27): 11/11 ≤4 мин, суммарно 20.1 мин, sharp в коридоре на 10/11**. Дальше: интеграция Найквист-режима в продукт, разбор Pack/BookCOver, замер скорости candle на свободном GPU.
+**Текущий фокус:** **Candle-продукт (2.28) — DONE**: `run27_hyb` в safetensors + FiLM-cond (A0 на входе) грузится в Rust/Candle, `descreen_file` по умолчанию идёт через candle (ort — fallback по `DESCREEN_ENGINE=ort`); паритет с Python-эталоном по этапам проверен (pre 0.3%, net = квантование PNG, финал 0.4–0.9%, backoff-решения совпадают). **Найквист-режим в продукт (2.29) — DONE**: `descreen_file(nyquist)` + `nyquist.rs` (plan/resize_box/upsample), паритет с 2.27 на 1821146u и Pack; cargo test 18/18. Дальше: разбор Pack/BookCOver (Pack sharp 1.37/dE 6.83 на 2.27, BookCOver resid 279>247), замер скорости candle на свободном GPU.
 
 ## Этап 1. Dataset Pipeline
 
@@ -49,6 +49,7 @@
 |---|---|---|---|
 | 4.1 | Инференс через `ort` (DirectML/CoreML) | DONE (критерий пересмотрен 2026-09-14: замеренный профиль DML ≈125 с / CPU ≈224 с на А4@300; цель <2.5 с → бэклог оптимизации) | Замеренный профиль зафиксирован в JOURNAL |
 | 4.2 | Tiling overlap-add с окном Ханна (порт из v3.7) | DONE (интерьер rmse 0.003 vs полный кадр, max 0.022, ни одного пикселя >0.05; seam-delta ≤0.0035; паритет Rust↔Python; найден и исправлен баг weight×3 в accumulate) | Бесшовная сборка, тест на стыках |
+| 4.3 | Найквист-режим в продукт: даунсэмпл до периода 2 px, обработка на chain-разрешении, возврат исходного размера | DONE (2.29: `src-tauri/src/nyquist.rs` — `plan()` (scale=2r, verify-loop ≤2 по r_out с corr=r/0.5 как в 2.27-протоколе), `resize_box_rgb` (фракционные box-окна), `upsample_rgb` (Lanczos3, DC-сохраняющий); `descreen_file(nyquist)` — A0/cond после даунсэмпла, dbg-дамп `{stem}_dbg_out.png`, Tauri `run_descreen(nyquist)`, UI-чекбокс, `DESCREEN_NYQUIST=1` в `descreen_bench`; паритет с 2.27: 1821146u scale 0.2969/r_out 0.5010 — метрики py29 resid 97.3/top4 233.7 vs rust27 160.4/279.5 (лучше), Pack scale 0.1500/r_out 0.5007 — resid 90.5 vs 83.3, top4 307.5 vs 291.9, sharp 1.26 vs 1.37; cargo test 18/18 | Воспроизведение манифеста/качества 2.27 (`Data/RealScan/_nyq/`), выход всегда исходного размера |
 
 ## Этап 5. Frontend
 

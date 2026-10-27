@@ -206,10 +206,11 @@ pub fn descreen_file(
     blend: f32,
     tp: TileParams,
     progress: &mut dyn FnMut(usize, usize),
+    nyquist: bool,
 ) -> Result<DescreenCore, String> {
     let rgb = load_rgb(in_path)?;
     let (w, h) = rgb.dimensions();
-    let (wu, hu) = (w as usize, h as usize);
+    let (mut wu, mut hu) = (w as usize, h as usize);
     let mut img = ndarray::Array3::<f32>::zeros((3, hu, wu));
     for (x, y, px) in rgb.enumerate_pixels() {
         img[[0, y as usize, x as usize]] = px[0] as f32 / 255.0;
@@ -220,7 +221,39 @@ pub fn descreen_file(
     // Classical prefilter unloads the net: measured screen + LF banding gone,
     // the net owns detail only.
     let pcfg = PrefilterCfg::default();
-    // A0-замер на исходнике (до префильтра) — cond для FiLM-run27_hyb;
+    // Найквист–Котельников режим (2.27→продукт): приводим период растра к
+    // 2 px (r=0.5), вся цепочка работает в этом разрешении, результат
+    // возвращается в исходный размер (Lanczos3).
+    let nyq = if nyquist {
+        crate::nyquist::plan(&img, &pcfg)
+    } else {
+        crate::nyquist::NyquistPlan {
+            r_in: 0.0,
+            conf_in: 0.0,
+            scale: 1.0,
+            r_out: 0.0,
+            out_w: wu,
+            out_h: hu,
+            iters: 0,
+        }
+    };
+    let nyq_active = nyquist && nyq.scale < crate::nyquist::SCALE_SKIP;
+    if nyq_active {
+        eprintln!(
+            "[stage] nyquist: r_in={:.4} conf={:.3} scale={:.4} out={}x{} r_out={:.4} iters={}",
+            nyq.r_in,
+            nyq.conf_in,
+            nyq.scale,
+            nyq.out_w,
+            nyq.out_h,
+            nyq.r_out,
+            nyq.iters
+        );
+        img = crate::nyquist::resize_box_rgb(&img, nyq.scale);
+        hu = nyq.out_h;
+        wu = nyq.out_w;
+    }
+    // A0-замер на входе сети (до префильтра) — cond для FiLM-run27_hyb;
     // паритет с eval_realscan.py:140-166. Для ort/run3 cond игнорируется.
     let est = crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024);
     let cond = crate::candle_engine::build_cond_vec(est.r, est.angle_deg, est.confidence);
@@ -256,7 +289,7 @@ pub fn descreen_file(
             "{}_dbg_notch.png",
             in_path.file_stem().and_then(|s| s.to_str()).unwrap_or("scan")
         ));
-        let mut dbg_img = image::RgbImage::new(w, h);
+        let mut dbg_img = image::RgbImage::new(wu as u32, hu as u32);
         for y in 0..hu {
             for x in 0..wu {
                 let p = dbg_img.get_pixel_mut(x as u32, y as u32);
@@ -289,7 +322,7 @@ pub fn descreen_file(
             "{}_dbg_pre.png",
             in_path.file_stem().and_then(|s| s.to_str()).unwrap_or("scan")
         ));
-        let mut dbg_img = image::RgbImage::new(w, h);
+        let mut dbg_img = image::RgbImage::new(wu as u32, hu as u32);
         for y in 0..hu {
             for x in 0..wu {
                 let p = dbg_img.get_pixel_mut(x as u32, y as u32);
@@ -400,12 +433,36 @@ pub fn descreen_file(
         eprintln!("[stage] net bandE={:.4}", _sbe3(&_luma3(&out), 0.12, 0.18));
         eprintln!("[stage] final bandE={:.4}", _sbe3(&_luma3(&toned), 0.12, 0.18));
     }
+    // Найквист-режим: цепочка работала в уменьшенном разрешении — результат
+    // возвращается в исходный размер (Lanczos3), чтобы UI/файл совпадали с входом.
+    let toned_res = if nyq_active {
+        // bench-протокол 2.27: метрики на chain-разрешении
+        if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+            let dbg_path = in_path.with_file_name(format!(
+                "{}_dbg_out.png",
+                in_path.file_stem().and_then(|s| s.to_str()).unwrap_or("scan")
+            ));
+            let mut dbg_img = image::RgbImage::new(wu as u32, hu as u32);
+            for y in 0..hu {
+                for x in 0..wu {
+                    let p = dbg_img.get_pixel_mut(x as u32, y as u32);
+                    for ch in 0..3 {
+                        p[ch] = (toned[[ch, y, x]].clamp(0.0, 1.0) * 255.0).round() as u8;
+                    }
+                }
+            }
+            let _ = dbg_img.save(&dbg_path);
+        }
+        crate::nyquist::upsample_rgb(&toned, w as usize, h as usize)
+    } else {
+        toned
+    };
     let mut mixed = image::RgbImage::new(w, h);
-    for y in 0..hu {
-        for x in 0..wu {
+    for y in 0..h as usize {
+        for x in 0..w as usize {
             let p = mixed.get_pixel_mut(x as u32, y as u32);
             for ch in 0..3 {
-                p[ch] = (toned[[ch, y, x]].clamp(0.0, 1.0) * 255.0).round() as u8;
+                p[ch] = (toned_res[[ch, y, x]].clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
     }
@@ -483,7 +540,9 @@ async fn run_descreen(
     state: State<'_, AppState>,
     path: String,
     blend: f32,
+    nyquist: Option<bool>,
 ) -> Result<DescreenOut, String> {
+    let nyquist = nyquist.unwrap_or(false);
     let mut engine = ensure_engine(&state, &app)?;
     let in_path = PathBuf::from(path);
     let tp = TileParams::default();
@@ -491,7 +550,7 @@ async fn run_descreen(
         let mut cb = |done: usize, total: usize| {
             let _ = app.emit("descreen-progress", ProgressPayload { done, total });
         };
-        let r = descreen_file(&mut engine, &in_path, blend, tp, &mut cb);
+        let r = descreen_file(&mut engine, &in_path, blend, tp, &mut cb, nyquist);
         (engine, r)
     })
     .await
@@ -602,6 +661,7 @@ mod tests {
             1.0,
             TileParams { tile: 256, overlap: 32 },
             &mut |d, t| prog.push((d, t)),
+            false,
         )
         .unwrap();
         let out_rgb = image::open(&core.output_path).unwrap().to_rgb8();
@@ -622,6 +682,58 @@ mod tests {
         ms /= (h * w) as f64;
         mo /= (h * w) as f64;
         assert!((ms - mo).abs() < 0.03, "tone must hold: {ms} vs {mo}");
+    }
+
+    #[test]
+    fn descreen_nyquist_returns_source_size_and_drops_band() {
+        use crate::prefilter::{luma_of, screen_band_energy};
+        use ndarray::Array3;
+
+        runtime::prepare_runtime().unwrap();
+        let model = runtime::resolve_model(None).unwrap();
+        let eng = InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
+        let mut eng = Engine::Ort(eng);
+        let dir = std::env::temp_dir().join("descreen_nyquist_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (w, h) = (512u32, 512u32);
+        let mut rgb = image::RgbImage::new(w, h);
+        for (x, y, px) in rgb.enumerate_pixels_mut() {
+            let fx = x as f32 / w as f32;
+            let content = 0.3 + 0.35 * fx;
+            let g1 = 0.09 * (2.0 * std::f32::consts::PI * 0.15 * fx * w as f32).cos();
+            let v = ((content + g1).clamp(0.0, 1.0) * 255.0).round() as u8;
+            *px = image::Rgb([v, v, v]);
+        }
+        let inp = dir.join("am_nyq.png");
+        rgb.save(&inp).unwrap();
+        let before = luma_of(&{
+            let r = image::open(&inp).unwrap().to_rgb8();
+            Array3::from_shape_fn((3, h as usize, w as usize), |(ch, y, x)| {
+                r.get_pixel(x as u32, y as u32)[ch] as f32 / 255.0
+            })
+        });
+        let r0 = screen_band_energy(&before, 0.12, 0.18);
+        assert!(r0 > 0.05, "grating must be present, got {r0}");
+
+        let core = descreen_file(
+            &mut eng,
+            &inp,
+            1.0,
+            TileParams { tile: 256, overlap: 32 },
+            &mut |_, _| {},
+            true,
+        )
+        .unwrap();
+        // вывод всегда в исходном размере
+        assert_eq!((core.width, core.height), (w, h));
+        let out_rgb = image::open(&core.output_path).unwrap().to_rgb8();
+        assert_eq!(out_rgb.dimensions(), (w, h));
+        let after = luma_of(&Array3::from_shape_fn((3, h as usize, w as usize), |(ch, y, x)| {
+            out_rgb.get_pixel(x as u32, y as u32)[ch] as f32 / 255.0
+        }));
+        let r1 = screen_band_energy(&after, 0.12, 0.18);
+        eprintln!("nyquist chain band 0.12-0.18: {r0} -> {r1}");
+        assert!(r1 < r0 * 0.6, "nyquist chain must drop the band: {r0} -> {r1}");
     }
 
     #[test]
@@ -649,6 +761,7 @@ mod tests {
             0.85,
             TileParams { tile: 256, overlap: 32 },
             &mut |d, t| prog.push((d, t)),
+            false,
         )
         .unwrap();
         assert_eq!((core.width, core.height), (256, 256));

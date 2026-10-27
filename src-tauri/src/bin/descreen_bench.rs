@@ -128,6 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // mirrors the Tauri run_descreen command. Saves <stem>_descreened.png.
     if let Some(path) = chain_in {
         let tp = TileParams { tile, overlap };
+        let nyquist = std::env::var("DESCREEN_NYQUIST").is_ok();
         let mut last = (0usize, 0usize);
         let t0 = Instant::now();
         let core = descreen_studio::app::descreen_file(
@@ -141,6 +142,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     println!("tile {d}/{t}");
                 }
             },
+            nyquist,
         )?;
         println!(
             "chain done: {} ({}x{}, {:.1}s, {}/{})",
