@@ -29,6 +29,7 @@ image = "0.25"
 rustfft = "6.2"
 base64 = "0.22"
 itertools = "0.13"
+rayon = "1"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -1063,6 +1063,7 @@ dependencies = [
  "itertools 0.13.0",
  "ndarray",
  "ort",
+ "rayon",
  "rustfft",
  "safetensors 0.4.5",
  "serde",

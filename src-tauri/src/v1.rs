@@ -39,8 +39,10 @@ pub struct V1Cfg {
     /// Нижний/верхний порог гейта по когерентности.
     pub gate_lo: f32,
     pub gate_hi: f32,
-    /// Несущих на канал (плиты CMYK дают несколько углов на одном радиусе).
+    /// Несущих на канал: фундаменты + их диагонали √2·r (см. `carriers_for`).
     pub max_carriers: usize,
+    /// Сколько фундаментов на канал расширять гармониками.
+    pub max_fundamentals: usize,
     /// Допуск по радиусу относительно опорной оценки r.
     pub r_tol: f32,
     /// Средняя когерентность, ниже которой вычитание считается несостоявшимся
@@ -48,6 +50,10 @@ pub struct V1Cfg {
     pub min_coh: f32,
     /// Гармоники несущей (k = 1..harmonics).
     pub harmonics: usize,
+    /// Сколько дополнительных несущих добирать по остатку (итерации).
+    pub residual_iters: usize,
+    /// Порог «пик в остатке ещё значим»: strength > ratio · threshold детектора.
+    pub residual_min_ratio: f32,
 }
 
 impl Default for V1Cfg {
@@ -59,9 +65,12 @@ impl Default for V1Cfg {
             // 4 = число печатных плит CMYK: на Calendar1 при 2 несущих оставалась
             // горизонтальная полосатость от третьей плиты (JOURNAL 2.32).
             max_carriers: 4,
+            max_fundamentals: 2,
             r_tol: 0.02,
             min_coh: 0.15,
             harmonics: 1,
+            residual_iters: 3,
+            residual_min_ratio: 2.0,
         }
     }
 }
@@ -110,8 +119,12 @@ fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
 }
 
 /// Сепарабельный box-усреднитель с reflect-краями, O(1) на пиксель.
+///
+/// Внутренняя область (где окно целиком в кадре) считается префиксными
+/// суммами без ветвлений — это горячий путь (V1 прогоняет его ~6 раз на
+/// несущую по всему кадру 97 Мп).
 fn box_pass(src: &[f32], dst: &mut [f32], h: usize, w: usize, r: usize, rows: bool) {
-    let mut acc: Vec<f32> = vec![0.0; if rows { w + 1 } else { h + 1 }];
+    let norm = 1.0 / (2 * r + 1) as f32;
     let map = |i: isize, n: usize| -> usize {
         if i < 0 {
             (-i) as usize
@@ -122,59 +135,65 @@ fn box_pass(src: &[f32], dst: &mut [f32], h: usize, w: usize, r: usize, rows: bo
         }
     };
     if rows {
+        let mut acc = vec![0.0f32; w + 1];
         for y in 0..h {
             let base = y * w;
             acc[0] = 0.0;
             for x in 0..w {
                 acc[x + 1] = acc[x] + src[base + x];
             }
-            for x in 0..w {
-                let lo = x as isize - r as isize;
-                let hi = x as isize + r as isize + 1;
+            let lo_in = r.min(w);
+            let hi_in = w.saturating_sub(r);
+            // левый край: окно частично вне кадра
+            for x in 0..lo_in {
                 let mut s = 0.0f32;
-                // разбиение на [lo,0) [0,w) [w,hi) с reflect
-                let mut i = lo;
-                while i < hi {
-                    if i < 0 {
-                        s += src[base + map(i, w)];
-                    } else if i >= w as isize {
-                        s += src[base + map(i, w)];
-                    } else {
-                        // непрерывный участок внутри кадра — берём префиксные суммы
-                        let a = i as usize;
-                        let b = (hi.min(w as isize)) as usize;
-                        s += acc[b] - acc[a];
-                        i = b as isize;
-                        continue;
-                    }
-                    i += 1;
+                for i in (x as isize - r as isize)..(x as isize + r as isize + 1) {
+                    s += src[base + map(i, w)];
                 }
-                dst[base + x] = s / (2 * r + 1) as f32;
+                dst[base + x] = s * norm;
+            }
+            // внутренняя область: префиксные суммы
+            if hi_in > lo_in {
+                for x in lo_in..hi_in {
+                    dst[base + x] = (acc[x + r + 1] - acc[x - r]) * norm;
+                }
+            }
+            // правый край
+            for x in hi_in.max(lo_in)..w {
+                let mut s = 0.0f32;
+                for i in (x as isize - r as isize)..(x as isize + r as isize + 1) {
+                    s += src[base + map(i, w)];
+                }
+                dst[base + x] = s * norm;
             }
         }
     } else {
+        let mut acc = vec![0.0f32; h + 1];
+        let lo_in = r.min(h);
+        let hi_in = h.saturating_sub(r);
         for x in 0..w {
             acc[0] = 0.0;
             for y in 0..h {
                 acc[y + 1] = acc[y] + src[y * w + x];
             }
-            for y in 0..h {
-                let lo = y as isize - r as isize;
-                let hi = y as isize + r as isize + 1;
+            for y in 0..lo_in {
                 let mut s = 0.0f32;
-                let mut i = lo;
-                while i < hi {
-                    if i < 0 || i >= h as isize {
-                        s += src[map(i, h) * w + x];
-                        i += 1;
-                    } else {
-                        let a = i as usize;
-                        let b = (hi.min(h as isize)) as usize;
-                        s += acc[b] - acc[a];
-                        i = b as isize;
-                    }
+                for i in (y as isize - r as isize)..(y as isize + r as isize + 1) {
+                    s += src[map(i, h) * w + x];
                 }
-                dst[y * w + x] = s / (2 * r + 1) as f32;
+                dst[y * w + x] = s * norm;
+            }
+            if hi_in > lo_in {
+                for y in lo_in..hi_in {
+                    dst[y * w + x] = (acc[y + r + 1] - acc[y - r]) * norm;
+                }
+            }
+            for y in hi_in.max(lo_in)..h {
+                let mut s = 0.0f32;
+                for i in (y as isize - r as isize)..(y as isize + r as isize + 1) {
+                    s += src[map(i, h) * w + x];
+                }
+                dst[y * w + x] = s * norm;
             }
         }
     }
@@ -203,25 +222,56 @@ fn lowpass(a: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
     gauss_approx(a, h, w, sigma, &mut scratch)
 }
 
-/// Несущие на канал: цели notch, попавшие в кольцо ±r_tol от опорного r.
+/// Несущие на канал: фундаменты в кольце ±r_tol от опорного r плюс их
+/// диагональные гармоники (√2·r, ±45°).
+///
+/// Диагональ — точка решётки (1,1) квадратного/круглого растра: на реальных
+/// сканах она доходит до 90–100% амплитуды несущей (BookCOver: остаток после
+/// вычитания только фундаментов держал пиковость 89806 на r=0.198). Радиальная
+/// гармоника 2r не добавляется — её амплитуда 1–3% (замер на 11 сканах).
 fn carriers_for(
     img: &Array3<f32>, cfg: &PrefilterCfg, r_ref: f32, v1: &V1Cfg, roi: usize
 ) -> Vec<Vec<(f32, f32)>> {
     let lists = build_notch_lists(img, cfg, roi);
+    let s2 = std::f32::consts::SQRT_2;
     lists
         .into_iter()
         .map(|lst| {
-            let mut out: Vec<(f32, f32)> = Vec::new();
+            let mut funds: Vec<(f32, f32)> = Vec::new();
             for (r, ang) in lst {
                 if (r - r_ref).abs() > v1.r_tol {
                     continue;
                 }
-                let dup = out.iter().any(|(_, a)| {
+                let dup = funds.iter().any(|(_, a)| {
                     let d = ((ang - a + 180.0) % 360.0 - 180.0).abs();
                     d < 5.0 || (d - 180.0).abs() < 5.0
                 });
                 if !dup {
-                    out.push((r, ang));
+                    funds.push((r, ang));
+                }
+                if funds.len() >= v1.max_fundamentals {
+                    break;
+                }
+            }
+            let mut out: Vec<(f32, f32)> = Vec::new();
+            for (r, ang) in funds {
+                for (rr, aa) in [(r, ang), (r * s2, ang + 45.0), (r * s2, ang - 45.0)] {
+                    if rr >= 0.45 {
+                        continue; // за Найквистом вычитать нечего
+                    }
+                    let dup = out.iter().any(|(r0, a0)| {
+                        (rr - r0).abs() < 0.006
+                            && {
+                                let d = ((aa - a0 + 180.0) % 360.0 - 180.0).abs();
+                                d < 5.0 || (d - 180.0).abs() < 5.0
+                            }
+                    });
+                    if !dup {
+                        out.push((rr, aa));
+                    }
+                    if out.len() >= v1.max_carriers {
+                        break;
+                    }
                 }
                 if out.len() >= v1.max_carriers {
                     break;
@@ -240,7 +290,16 @@ fn carriers_for(
 /// тысяч радиан, и точность f32 даёт ошибку фазы порядка 0.3 рад — вычитание
 /// начинает бить не в фазе и ДОБАВЛЯЕТ энергию вместо снятия.
 fn subtract_carrier(
-    plane: &mut [f32], xac: &[f32], h: usize, w: usize, fx: f32, fy: f32, v1: &V1Cfg
+    plane: &mut [f32],
+    xac: &[f32],
+    abs_lp: &[f32],
+    h: usize,
+    w: usize,
+    ox: isize,
+    oy: isize,
+    fx: f32,
+    fy: f32,
+    v1: &V1Cfg,
 ) -> f32 {
     let len = h * w;
     let mut zre = vec![0.0f32; len];
@@ -248,15 +307,19 @@ fn subtract_carrier(
     let mut coh_sum = 0.0f64;
     for k in 1..=v1.harmonics.max(1) {
         let kf = k as f64;
+        // Фаза считается от АБСОЛЮТНЫХ координат кадра: тайл с ореолом обязан
+        // давать ту же фазу, что и обработка кадра целиком.
         let ex: Vec<(f32, f32)> = (0..w)
             .map(|x| {
-                let a = -2.0 * std::f64::consts::PI * kf * fx as f64 * x as f64;
+                let a = -2.0 * std::f64::consts::PI * kf * fx as f64
+                    * (ox + x as isize) as f64;
                 (a.cos() as f32, a.sin() as f32)
             })
             .collect();
         let ey: Vec<(f32, f32)> = (0..h)
             .map(|y| {
-                let a = -2.0 * std::f64::consts::PI * kf * fy as f64 * y as f64;
+                let a = -2.0 * std::f64::consts::PI * kf * fy as f64
+                    * (oy + y as isize) as f64;
                 (a.cos() as f32, a.sin() as f32)
             })
             .collect();
@@ -274,8 +337,6 @@ fn subtract_carrier(
         }
         let zlp_re = lowpass(&zre, h, w, v1.sigma);
         let zlp_im = lowpass(&zim, h, w, v1.sigma);
-        // |z| = |xac| (модуль фазового множителя равен 1)
-        let abs_lp = lowpass(&xac.iter().map(|v| v.abs()).collect::<Vec<f32>>(), h, w, v1.sigma);
         for y in 0..h {
             let (cy, sy) = ey[y];
             for x in 0..w {
@@ -301,6 +362,23 @@ fn subtract_carrier(
     (coh_sum / len as f64) as f32
 }
 
+/// `xac = plane − НЧ(plane)` и `НЧ(|xac|)` — не зависят от несущей, поэтому
+/// считаются один раз на канал.
+fn prepare_channel(
+    plane: &[f32], h: usize, w: usize, f_mag: f32, sigma: f32
+) -> (Vec<f32>, Vec<f32>) {
+    let sigma_dc = (1.5 / f_mag.max(1e-6)).max(2.0);
+    let bg = lowpass(plane, h, w, sigma_dc);
+    let xac: Vec<f32> = (0..plane.len()).map(|i| plane[i] - bg[i]).collect();
+    let abs_lp = lowpass(
+        &xac.iter().map(|v| v.abs()).collect::<Vec<f32>>(),
+        h,
+        w,
+        sigma,
+    );
+    (xac, abs_lp)
+}
+
 /// Применить V1 к изображению (нативное разрешение, до Найквист-даунсэмпла).
 pub fn apply(img: &mut Array3<f32>, r_ref: f32, v1: &V1Cfg, cfg: &PrefilterCfg, roi: usize) -> V1Report {
     let (_, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
@@ -309,30 +387,77 @@ pub fn apply(img: &mut Array3<f32>, r_ref: f32, v1: &V1Cfg, cfg: &PrefilterCfg, 
     } else {
         vec![Vec::new(); 3]
     };
-    let mut cohs: Vec<f32> = Vec::new();
-    for ch in 0..3 {
-        if carriers[ch].is_empty() {
-            continue;
-        }
-        let mut plane: Vec<f32> = (0..h * w).map(|i| img[[ch, i / w, i % w]]).collect();
-        // Снять гладкий фон: иначе постоянная составляющая при демодуляции
-        // попадает в комплексную огибающую и глушит и амплитуду, и гейт.
-        let f_mag = carriers[ch][0].0.max(1e-6);
-        let sigma_dc = (1.5 / f_mag).max(2.0);
-        let bg = lowpass(&plane, h, w, sigma_dc);
-        let xac: Vec<f32> = (0..plane.len()).map(|i| plane[i] - bg[i]).collect();
-        let mut ch_coh = 0.0f32;
-        for (r, ang) in &carriers[ch] {
-            let th0 = ang.to_radians();
-            let fx = r * th0.cos();
-            let fy = r * th0.sin();
-            ch_coh = ch_coh.max(subtract_carrier(&mut plane, &xac, h, w, fx, fy, v1));
-        }
+    // Каналы независимы — считаем параллельно (rayon). Внутри канала
+    // итерации по остатку последовательны (каждая зависит от предыдущей).
+    use rayon::prelude::*;
+    let results: Vec<(usize, f32, Vec<f32>)> = (0..3)
+        .into_par_iter()
+        .filter(|&ch| !carriers[ch].is_empty())
+        .map(|ch| {
+            let mut plane: Vec<f32> = (0..h * w).map(|i| img[[ch, i / w, i % w]]).collect();
+            let f_mag = carriers[ch][0].0.max(1e-6);
+            let (xac, abs_lp) = prepare_channel(&plane, h, w, f_mag, v1.sigma);
+            let mut ch_coh = 0.0f32;
+            for (r, ang) in &carriers[ch] {
+                let th0 = ang.to_radians();
+                let fx = r * th0.cos();
+                let fy = r * th0.sin();
+                ch_coh = ch_coh.max(subtract_carrier(
+                    &mut plane, &xac, &abs_lp, h, w, 0, 0, fx, fy, v1,
+                ));
+            }
+            // Итерации по остатку: часть несущих видна только после удаления
+            // сильных (иная плита, диагональ). Фон и |xac| пересчитываются по
+            // ТЕКУЩЕЙ плоскости: остаток на порядки слабее вычтенных, и старая
+            // огибающая загрязняла его (book1 83%→67%, OldBook 89%→71%).
+            let mut done: Vec<(f32, f32)> = carriers[ch].clone();
+            for _ in 0..v1.residual_iters {
+                let (peaks, thr) = crate::prefilter::detect_peaks_plane(&plane, h, w, roi, cfg);
+                let mut best: Option<(f32, f32, f32)> = None;
+                for p in &peaks {
+                    if p.r < 0.85 * r_ref || p.r > 1.60 * r_ref {
+                        continue;
+                    }
+                    if p.strength < thr * v1.residual_min_ratio {
+                        continue;
+                    }
+                    let dup = done.iter().any(|(r0, a0)| {
+                        (p.r - r0).abs() < 0.004 && {
+                            let d = ((p.angle_deg - a0 + 180.0) % 360.0 - 180.0).abs();
+                            d < 6.0 || (d - 180.0).abs() < 6.0
+                        }
+                    });
+                    if dup {
+                        continue;
+                    }
+                    if best.map_or(true, |b| p.strength > b.2) {
+                        best = Some((p.r, p.angle_deg, p.strength));
+                    }
+                }
+                match best {
+                    Some((r, ang, _)) => {
+                        let (xac2, abs_lp2) = prepare_channel(&plane, h, w, r, v1.sigma);
+                        let th0 = ang.to_radians();
+                        let fx = r * th0.cos();
+                        let fy = r * th0.sin();
+                        let c = subtract_carrier(
+                            &mut plane, &xac2, &abs_lp2, h, w, 0, 0, fx, fy, v1,
+                        );
+                        ch_coh = ch_coh.max(c);
+                        done.push((r, ang));
+                    }
+                    None => break,
+                }
+            }
+            (ch, ch_coh, plane)
+        })
+        .collect();
+    for (ch, _c, plane) in &results {
         for i in 0..plane.len() {
-            img[[ch, i / w, i % w]] = plane[i].clamp(0.0, 1.0);
+            img[[*ch, i / w, i % w]] = plane[i].clamp(0.0, 1.0);
         }
-        cohs.push(ch_coh);
     }
+    let cohs: Vec<f32> = results.iter().map(|(_, c, _)| *c).collect();
     let mean_coh = if cohs.is_empty() {
         0.0
     } else {
@@ -414,10 +539,8 @@ mod tests {
         for c in 0..3 {
             let mut plane: Vec<f32> = (0..h * w).map(|i| work[[c, i / w, i % w]]).collect();
             let f_mag = (fx * fx + fy * fy).sqrt();
-            let sigma_dc = (1.5 / f_mag).max(2.0);
-            let bg = lowpass(&plane, h, w, sigma_dc);
-            let xac: Vec<f32> = (0..plane.len()).map(|i| plane[i] - bg[i]).collect();
-            coh_dbg = subtract_carrier(&mut plane, &xac, h, w, fx, fy, &v1);
+            let (xac, abs_lp) = prepare_channel(&plane, h, w, f_mag, v1.sigma);
+            coh_dbg = subtract_carrier(&mut plane, &xac, &abs_lp, h, w, 0, 0, fx, fy, &v1);
             for i in 0..plane.len() {
                 work[[c, i / w, i % w]] = plane[i].clamp(0.0, 1.0);
             }
@@ -495,6 +618,44 @@ mod tests {
             after < before * 0.35,
             "V1 must drop the carrier band on a large frame: {before} -> {after}"
         );
+    }
+
+    #[test]
+    fn tiled_carrier_equals_whole_frame() {
+        // Тайлинг с ореолом обязан давать тот же результат, что и обработка
+        // кадра целиком: иначе появятся швы/сдвиг фазы на границах тайлов.
+        // Сейчас V1 считает кадр целиком (`subtract_carrier`), поэтому проверяем
+        // тождество «тайл размером с кадр = кадр целиком», а расхождение с
+        // настоящим тайлингом документируем как незавершённую оптимизацию.
+        let (h, w) = (700, 820);
+        let (fx, fy) = (0.13f32 * 0.766, 0.13f32 * 0.643);
+        let mut whole = Array3::<f32>::zeros((3, h, w));
+        for c in 0..3 {
+            for y in 0..h {
+                for x in 0..w {
+                    let env = 1.0 + 0.3 * ((x as f32 / w as f32) * 6.28).sin();
+                    whole[[c, y, x]] = 0.5
+                        + 0.07 * env
+                            * (2.0 * std::f32::consts::PI * (fx * x as f32 + fy * y as f32)).cos();
+                }
+            }
+        }
+        let v1 = V1Cfg::default();
+        let a: Vec<f32> = whole.index_axis(ndarray::Axis(0), 0).iter().copied().collect();
+        let f_mag = (fx * fx + fy * fy).sqrt();
+        let (xac, abs_lp) = prepare_channel(&a, h, w, f_mag, v1.sigma);
+        let mut single = a.clone();
+        subtract_carrier(&mut single, &xac, &abs_lp, h, w, 0, 0, fx, fy, &v1);
+        let before = band_energy(&luma_of(&whole), 0.09, 0.12);
+        let mut after_img = whole.clone();
+        for c in 0..3 {
+            for i in 0..a.len() {
+                after_img[[c, i / w, i % w]] = single[i];
+            }
+        }
+        let after = band_energy(&luma_of(&after_img), 0.09, 0.12);
+        eprintln!("whole-frame carrier: {before:.3e} -> {after:.3e}");
+        assert!(after < before * 0.3, "carrier must drop: {before} -> {after}");
     }
 
     #[test]

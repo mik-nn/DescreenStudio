@@ -384,6 +384,33 @@ pub struct RasterEstimate {
     pub confidence: f32,
 }
 
+/// Пики по одному каналу-плоскости (CPU, ROI в центре) — для итеративного
+/// поиска остаточной несущей: после вычитания сильных плит часть несущих
+/// становится видимой только в остатке (BookCOver: 0.140@−134 отсутствует в
+/// первичном списке, но доминирует после удаления соседних).
+pub fn detect_peaks_plane(
+    plane: &[f32], h: usize, w: usize, roi: usize, cfg: &PrefilterCfg
+) -> (Vec<Peak>, f32) {
+    let s = roi.min(h).min(w);
+    let y0 = h / 2 - s / 2;
+    let x0 = w / 2 - s / 2;
+    let mut v = vec![0.0f32; s * s];
+    for y in 0..s {
+        for x in 0..s {
+            v[y * s + x] = plane[(y0 + y) * w + (x0 + x)];
+        }
+    }
+    let mean = v.iter().sum::<f32>() / v.len() as f32;
+    for val in v.iter_mut() {
+        *val -= mean;
+    }
+    let raw = fft2_forward(&v, s);
+    let lm = logmag_shifted(&raw, s);
+    let bg = box_blur(&lm, s, cfg.tophat_win);
+    let diff: Vec<f32> = lm.iter().zip(bg.iter()).map(|(a, b)| (a - b).max(0.0)).collect();
+    detect_peaks(&diff, s, cfg)
+}
+
 pub fn estimate_raster(gray: &Array2<f32>, cfg: &PrefilterCfg, roi: usize) -> RasterEstimate {
     let (h, w) = (gray.shape()[0], gray.shape()[1]);
     let s = roi.min(h).min(w);
