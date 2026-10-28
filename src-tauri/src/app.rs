@@ -217,6 +217,7 @@ pub fn descreen_file(
     tp: TileParams,
     progress: &mut dyn FnMut(usize, usize),
     nyquist: bool,
+    v1_enabled: bool,
 ) -> Result<DescreenCore, String> {
     let rgb = load_rgb(in_path)?;
     let (w, h) = rgb.dimensions();
@@ -248,6 +249,39 @@ pub fn descreen_file(
         }
     };
     let nyq_active = nyquist && nyq.scale < crate::nyquist::SCALE_SKIP;
+    // V1 (2.32): параметрическое вычитание растра «оценить -> синтезировать ->
+    // вычесть». Работает в НАТИВНОМ разрешении и поэтому идёт ДО Найквист-
+    // даунсэмпла: на chain-кадре (период 2 px) демодуляция вырождена — боковые
+    // полосы АМ складываются. `plan()` уже посчитан по исходному изображению,
+    // так что масштаб нормализации вычитание не портит.
+    let v1_cfg = crate::v1::V1Cfg::from_env();
+    let v1_acted = if v1_enabled {
+        let est_native = crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024);
+        let band0 = crate::prefilter::band_energy_abs(&luma_of(&img), 0.40 * est_native.r / 0.5, 0.50 * est_native.r / 0.5);
+        let t1 = Instant::now();
+        let rep = crate::v1::apply(&mut img, est_native.r, &v1_cfg, &pcfg, 1024);
+        let band1 = crate::prefilter::band_energy_abs(&luma_of(&img), 0.40 * est_native.r / 0.5, 0.50 * est_native.r / 0.5);
+        eprintln!(
+            "[stage] V1: r_ref={:.4} sigma={} gate=({}, {}) carriers={:?} coh={:.2} acted={} band={:.3e}->{:.3e} ({:.1}%) {:.1}s",
+            rep.r_ref,
+            v1_cfg.sigma,
+            v1_cfg.gate_lo,
+            v1_cfg.gate_hi,
+            rep.carriers
+                .iter()
+                .map(|v| v.iter().map(|(r, a)| format!("{r:.3}@{a:.0}")).collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
+            rep.mean_coh,
+            rep.acted,
+            band0,
+            band1,
+            if band0 > 0.0 { 100.0 * (1.0 - band1 / band0) } else { 0.0 },
+            t1.elapsed().as_secs_f64()
+        );
+        rep.acted
+    } else {
+        false
+    };
     if nyq_active {
         eprintln!(
             "[stage] nyquist: r_in={:.4} conf={:.3} scale={:.4} out={}x{} r_out={:.4} iters={}",
@@ -290,8 +324,23 @@ pub fn descreen_file(
         );
         eprintln!("[stage] input bandE={:.4}", _sbe(&_luma(&img), 0.12, 0.18));
     }
+    // Классический notch остаётся как исходная стадия, но при сработавшем V1
+    // он уже не нужен: растр снят вычитанием, а «прокол» спектра только
+    // добавляет рингинг (замер 2.31: на Pack +34% энергии полосы). Режим:
+    // DESCREEN_NOTCH=auto (по умолчанию) | off | force.
+    let notch_mode = std::env::var("DESCREEN_NOTCH").unwrap_or_else(|_| "auto".into());
+    let skip_notch = match notch_mode.as_str() {
+        "off" => true,
+        "force" => false,
+        _ => v1_acted,
+    };
     let t00 = Instant::now();
-    let pre = adaptive_notch(&img, &peaks, &pcfg);
+    let pre = if skip_notch {
+        eprintln!("[stage] notch: skipped (v1_acted={v1_acted} mode={notch_mode})");
+        img.clone()
+    } else {
+        adaptive_notch(&img, &peaks, &pcfg)
+    };
     let t_notch = t00.elapsed();
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         // intermediate dump: notch stage output (border coverage diagnostics)
@@ -551,8 +600,10 @@ async fn run_descreen(
     path: String,
     blend: f32,
     nyquist: Option<bool>,
+    v1: Option<bool>,
 ) -> Result<DescreenOut, String> {
     let nyquist = nyquist.unwrap_or(false);
+    let v1 = v1.unwrap_or(true);
     let mut engine = ensure_engine(&state, &app)?;
     let in_path = PathBuf::from(path);
     let tp = TileParams::default();
@@ -560,7 +611,7 @@ async fn run_descreen(
         let mut cb = |done: usize, total: usize| {
             let _ = app.emit("descreen-progress", ProgressPayload { done, total });
         };
-        let r = descreen_file(&mut engine, &in_path, blend, tp, &mut cb, nyquist);
+        let r = descreen_file(&mut engine, &in_path, blend, tp, &mut cb, nyquist, v1);
         (engine, r)
     })
     .await
@@ -585,6 +636,12 @@ pub fn handler() -> impl Fn(tauri::ipc::Invoke) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Тесты гоняют цепочку без V1: проверяют классические стадии, а V1 имеет
+    /// собственные юнит-тесты в `v1::tests`.
+    fn v1_off_for_test() -> bool {
+        false
+    }
 
     fn tiny_png(dir: &Path) -> PathBuf {
         let (w, h) = (256u32, 256u32);
@@ -672,6 +729,7 @@ mod tests {
             TileParams { tile: 256, overlap: 32 },
             &mut |d, t| prog.push((d, t)),
             false,
+            v1_off_for_test(),
         )
         .unwrap();
         let out_rgb = image::open(&core.output_path).unwrap().to_rgb8();
@@ -732,6 +790,7 @@ mod tests {
             TileParams { tile: 256, overlap: 32 },
             &mut |_, _| {},
             true,
+            v1_off_for_test(),
         )
         .unwrap();
         // вывод всегда в исходном размере
@@ -772,6 +831,7 @@ mod tests {
             TileParams { tile: 256, overlap: 32 },
             &mut |d, t| prog.push((d, t)),
             false,
+            v1_off_for_test(),
         )
         .unwrap();
         assert_eq!((core.width, core.height), (256, 256));

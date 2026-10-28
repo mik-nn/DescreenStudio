@@ -23,6 +23,7 @@
 
   let aiBlend = $state(0.85);
   let nyquistMode = $state(false);
+  let v1Mode = $state(true);
   let isProcessing = $state(false);
   let isLoading = $state(false);
   let imagePath = $state<string | null>(null);
@@ -147,6 +148,7 @@
         path: imagePath,
         blend: aiBlend,
         nyquist: nyquistMode,
+        v1: v1Mode,
       });
       outputPath = res.output_path;
       const pv = await invoke<PreviewOut>("preview_image", {
@@ -291,6 +293,17 @@
             title="Приводит период растра к 2 px (Найквист–Котельников), обрабатывает в этом разрешении и возвращает исходный размер"
           >
             Найквист-режим (период растра = 2 px)
+          </span>
+        </span>
+      </label>
+
+      <label class="flex flex-col gap-1 text-xs text-neutral-400">
+        <span class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" bind:checked={v1Mode} class="accent-indigo-500" />
+          <span
+            title="Оценивает огибающую и фазу растра в нативном разрешении, синтезирует и ВЫЧИТАЕТ его (вместо вырезания полосы). Заменяет notch там, где растр когерентен"
+          >
+            V1: вычитание растра по фазе
           </span>
         </span>
       </label>

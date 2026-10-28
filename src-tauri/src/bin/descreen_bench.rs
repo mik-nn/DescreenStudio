@@ -129,6 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     if let Some(path) = chain_in {
         let tp = TileParams { tile, overlap };
         let nyquist = std::env::var("DESCREEN_NYQUIST").is_ok();
+        let v1 = std::env::var("DESCREEN_V1").map(|v| v != "0").unwrap_or(false);
         let mut last = (0usize, 0usize);
         let t0 = Instant::now();
         let core = descreen_studio::app::descreen_file(
@@ -143,6 +144,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }
             },
             nyquist,
+            v1,
         )?;
         println!(
             "chain done: {} ({}x{}, {:.1}s, {}/{})",

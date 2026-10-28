@@ -1112,6 +1112,41 @@ pub fn screen_band_energy(gray: &Array2<f32>, r_lo: f32, r_hi: f32) -> f32 {
     band / (tot + 1e-9)
 }
 
+/// АБСОЛЮТНАЯ энергия полосы (сумма |F|² в кольце), без нормировки на текущую
+/// энергию кадра.
+///
+/// Отличие от [`screen_band_energy`] принципиально: доля от текущей энергии
+/// бессмысленна после удаления растра — знаменатель сжимается вместе с
+/// сигналом, и «доля» может даже вырасти, хотя абсолютная энергия упала.
+/// Для оценки «сколько полосы снято» нужна абсолютная величина до и после
+/// на одном и том же ROI.
+pub fn band_energy_abs(gray: &Array2<f32>, r_lo: f32, r_hi: f32) -> f32 {
+    let (h, w) = (gray.shape()[0], gray.shape()[1]);
+    let n = h.min(w).min(1024);
+    let y0 = h / 2 - n / 2;
+    let x0 = w / 2 - n / 2;
+    let mut v = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            v[y * n + x] = gray[[y0 + y, x0 + x]];
+        }
+    }
+    let mean: f32 = v.iter().sum::<f32>() / v.len() as f32;
+    for val in v.iter_mut() {
+        *val -= mean;
+    }
+    let raw = fft2_forward(&v, n);
+    let mut band = 0.0f32;
+    for k in 0..n * n {
+        let (x, y) = (k % n, k / n);
+        let (_, _, r) = freq_at_raw(x, y, n);
+        if r >= r_lo && r < r_hi {
+            band += raw[k].norm_sqr();
+        }
+    }
+    band
+}
+
 fn smoothstep(lo: f32, hi: f32, x: f32) -> f32 {
     let t = ((x - lo) / (hi - lo + 1e-9)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
