@@ -145,6 +145,83 @@ def estimate_raster(gray: np.ndarray, cfg: SpectrumConfig) -> RasterEstimate:
     return RasterEstimate(fund.r, fund.angle_deg, confidence, harmonic_r, tuple(peaks))
 
 
+RING_TOP_K = 8
+RING_BIN = 0.004
+
+
+def ring_scores(
+    diff: np.ndarray, r_lo: float, r_hi: float, k: int = RING_TOP_K, bin_w: float = RING_BIN
+) -> tuple[np.ndarray, np.ndarray]:
+    """Кольцевой скоринг контраста: для каждого радиуса — среднее TOP_K по кольцу.
+
+    Растр — энергия одного радиуса, разложенная по углам (плиты CMYK) плюс
+    амплитудная модуляция вокруг него. Межкрасочные суммарные/разностные
+    продукты дают одиночные пики на ДРУГИХ радиусах. Кольцевая сумма поэтому
+    устойчивее глобального максимума, который может выбрать продукт.
+    Усреднение TOP_K не зависит от площади кольца и подавляет одиночные выбросы.
+    """
+    n = diff.shape[0]
+    yy, xx = np.mgrid[0:n, 0:n]
+    fx = (xx - n // 2) / n
+    fy = (yy - n // 2) / n
+    r = np.hypot(fx, fy)
+    radii = np.arange(r_lo, r_hi + 1e-9, bin_w)
+    scores = np.zeros(len(radii), dtype=np.float64)
+    for i, r0 in enumerate(radii):
+        sel = (r >= r0 - bin_w / 2) & (r < r0 + bin_w / 2) & (r > 0)
+        if int(sel.sum()) < k:
+            continue
+        v = diff[sel]
+        scores[i] = float(np.partition(v, -k)[-k:].mean())
+    return radii, scores
+
+
+def estimate_raster_ring(
+    gray: np.ndarray,
+    cfg: SpectrumConfig,
+    r_lo: float = 0.40,
+    r_hi: float = 0.50,
+    k: int = RING_TOP_K,
+    bin_w: float = RING_BIN,
+) -> RasterEstimate:
+    """Оценка несущей по кольцевой энергии в диапазоне [r_lo, r_hi].
+
+    Диапазон задаётся инвариантом конвейера: после Найквист-нормализации
+    (scale = 2r) период растра равен 2 px, т.е. r ≈ 0.5, и verify-loop держит
+    |r_out − 0.5| ≤ 0.02. Поэтому на chain-разрешении искать несущую по всему
+    спектру нельзя: там сидят суммарные продукты красок (у синтетики они
+    обгоняют несущую, у реальных сканов запас всего 2%).
+    """
+    h, w = gray.shape
+    n = min(cfg.measure_roi, h, w)
+    y = max(0, h // 2 - n // 2)
+    x = max(0, w // 2 - n // 2)
+    roi = gray[y : y + n, x : x + n]
+    diff = tophat_contrast(log_magnitude(roi), cfg.tophat_win)
+    peaks, thr = detect_peaks(diff, cfg)
+    radii, scores = ring_scores(diff, r_lo, r_hi, k, bin_w)
+    if not peaks or scores.size == 0 or scores.max() <= 0.0:
+        return RasterEstimate(0.0, 0.0, 0.0, None, tuple(peaks))
+    r_best = float(radii[int(np.argmax(scores))])
+    # Угол — сильнейший пик в пределах ±0.01 от найденного радиуса.
+    near = [p for p in peaks if abs(p.r - r_best) <= max(0.01, bin_w)]
+    fund = max(near, key=lambda p: p.strength) if near else peaks[0]
+    far = np.abs(radii - r_best) > 0.02
+    runner = float(scores[far].max()) if bool(far.any()) else 0.0
+    # Confidence как у estimate_raster: отрыв фундамента от порога; для кольца
+    # порог — уровень «фона» вне найденного радиуса.
+    conf = float(np.clip((float(scores.max()) - runner) / (runner + 1e-12) / 2.0, 0.0, 1.0))
+    harmonic_r: float | None = None
+    for p in peaks:
+        if p is fund:
+            continue
+        ratio = p.r / fund.r if fund.r > 0 else 0.0
+        if abs(ratio - float(np.sqrt(2.0))) < 0.08:
+            harmonic_r = p.r
+            break
+    return RasterEstimate(fund.r, fund.angle_deg, conf, harmonic_r, tuple(peaks))
+
+
 def harmonic_family(r: float, angle_deg: float) -> list[tuple[float, float]]:
     """Predicted notch targets of a square screen: fundamental, 2nd harmonic
     (same angle) and the two sqrt(2) diagonal harmonics (+-45 deg)."""

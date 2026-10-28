@@ -109,6 +109,31 @@ def residual_lf_moire(gray: np.ndarray, lo: float = 0.008, hi: float = 0.05) -> 
     return float(m.max() / (mag.mean() + 1e-12))
 
 
+def band_energy(
+    gray: np.ndarray, r_lo: float, r_hi: float, s: int = 1024, dc: float = 0.006
+) -> float:
+    """Интегральная доля энергии |F|² в кольце r_lo..r_hi (дополняет пиковые метрики).
+
+    `resid`/`top4` меряют высоту пика и слепы к «юбке» амплитудной модуляции,
+    гармоникам и межкрасочным биениям: узкий notch гасит пик, а видимая
+    полоса остаётся. Здесь берётся сумма |F|² по кольцу, нормированная на
+    энергию вне DC, — величина, пропорциональная видимой энергии растра.
+
+    На chain-разрешении несущая стоит на r=0.5, поэтому кольцо задаётся
+    явными границами (например, 0.44..0.50), а не «r0 ± half».
+    """
+    g = center_roi(gray, s)
+    n = g.shape[0]
+    f = np.fft.fftshift(np.fft.fft2(g - g.mean()))
+    p = np.abs(f) ** 2
+    _, _, r = _freq_grids(n)
+    band = (r >= r_lo) & (r < r_hi)
+    total = r >= dc
+    if not total.any():
+        return 0.0
+    return float(p[band].sum() / (p[total].sum() + 1e-12))
+
+
 def residual_quad_max(gray: np.ndarray, s: int = 512, var_min: float = 1e-6) -> float:
     """Худший остаточный пик по центрам 4 квадрантов (пустые пропускаются)."""
     h, w = gray.shape[:2]
