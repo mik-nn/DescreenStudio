@@ -1387,6 +1387,55 @@ pub fn dct_channels(luma: &Array2<f32>) -> Array3<f32> {
     out
 }
 
+/// Порог гейта LF: пиковость осевой полосы должна упасть хотя бы на 15%,
+/// иначе вычитание считается срезанием контента и откатывается.
+pub const LF_PEAK_DROP: f32 = 0.85;
+
+/// Пиковость осевой НЧ-полосы: max |F|² на осях / медиана вне осей (0.006–0.05).
+///
+/// Настоящая полоса сканера/бумаги даёт резкий осевой пик; контент даёт
+/// широкий спектр без выделенного пика. Нужна как гейт для LF-стадии: если
+/// после вычитания пиковость не упала, значит стадия срезала контент.
+pub fn axis_peakiness(gray: &Array2<f32>) -> f32 {    let (h, w) = (gray.shape()[0], gray.shape()[1]);
+    let n = h.min(w).min(1024);
+    let y0 = h / 2 - n / 2;
+    let x0 = w / 2 - n / 2;
+    let mut v = vec![0.0f32; n * n];
+    for y in 0..n {
+        for x in 0..n {
+            v[y * n + x] = gray[[y0 + y, x0 + x]];
+        }
+    }
+    let mean: f32 = v.iter().sum::<f32>() / v.len() as f32;
+    for val in v.iter_mut() {
+        *val -= mean;
+    }
+    let raw = fft2_forward(&v, n);
+    let mut on_axis: Vec<f32> = Vec::new();
+    let mut off_axis: Vec<f32> = Vec::new();
+    for y in 0..n {
+        for x in 0..n {
+            let (fx, fy, r) = freq_at_raw(x, y, n);
+            if !(0.006..0.05).contains(&r) {
+                continue;
+            }
+            let e = raw[y * n + x].norm_sqr();
+            if fx.abs() < 0.004 || fy.abs() < 0.004 {
+                on_axis.push(e);
+            } else {
+                off_axis.push(e);
+            }
+        }
+    }
+    if on_axis.is_empty() || off_axis.is_empty() {
+        return 0.0;
+    }
+    off_axis.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let med = off_axis[off_axis.len() / 2];
+    let max = on_axis.iter().cloned().fold(0.0f32, f32::max);
+    max / (med + 1e-30)
+}
+
 pub fn luma_of(img: &Array3<f32>) -> Array2<f32> {
     let (h, w) = (img.shape()[1], img.shape()[2]);
     Array2::from_shape_fn((h, w), |(y, x)| {
@@ -1397,6 +1446,31 @@ pub fn luma_of(img: &Array3<f32>) -> Array2<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn axis_peakiness_separates_band_from_content() {
+        // осевая полоса (дефект протяжки сканера), период 128 px, против шума
+        let (h, w) = (256, 256);
+        let mut band = Array2::<f32>::zeros((h, w));
+        let mut noise = Array2::<f32>::zeros((h, w));
+        let mut seed = 7u64;
+        for y in 0..h {
+            for x in 0..w {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let n = (seed & 0xFFFF) as f32 / 65535.0 - 0.5;
+                band[[y, x]] =
+                    0.5 + 0.05 * (2.0 * std::f32::consts::PI * x as f32 / 128.0).cos();
+                noise[[y, x]] = 0.5 + 0.05 * n;
+            }
+        }
+        let pk_band = axis_peakiness(&band);
+        let pk_noise = axis_peakiness(&noise);
+        eprintln!("axis_peakiness: band={pk_band:.0} noise={pk_noise:.1}");
+        assert!(pk_band > 1e6, "periodic axis band must stand out: {pk_band}");
+        assert!(pk_noise < 50.0, "content must not look periodic: {pk_noise}");
+    }
 
     #[test]
     fn fft_roundtrip() {

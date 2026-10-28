@@ -360,8 +360,38 @@ pub fn descreen_file(
         let _ = dbg_img.save(&dbg_path);
     }
     let bands = detect_lf_bands(&luma_of(&pre), &pcfg);
+    // LF-стадия (осевые полосы сканера/бумаги). Замер на контонном эталоне
+    // (Temp/lf_value.py): notch 18.74 дБ → notch+LF 17.42 дБ, то есть стадия
+    // снимает контент вместе с полосой. Оставлена переключаемой для A/B:
+    // DESCREEN_LF=off | force (по умолчанию force — прежнее поведение).
+    let lf_mode = std::env::var("DESCREEN_LF").unwrap_or_else(|_| "auto".into());
+    let skip_lf = lf_mode == "off";
     let t00 = Instant::now();
-    let pre = subtract_lf(&pre, &bands, &pcfg);
+    let pre = if skip_lf || bands.is_empty() {
+        if skip_lf {
+            eprintln!("[stage] lf: skipped (mode=off)");
+        }
+        pre
+    } else {
+        let cand = subtract_lf(&pre, &bands, &pcfg);
+        // Гейт: полоса настоящая, только если осевая пиковость реально упала.
+        // На book1/BookCOver вычитание снижало осевую энергию на ~20%, но
+        // пиковость не менялась (301.9→302.2, 2424.9→2434.1) — то есть
+        // срезался контент, а не полоса (Temp/lf_real.py).
+        let pk0 = crate::prefilter::axis_peakiness(&luma_of(&pre));
+        let pk1 = crate::prefilter::axis_peakiness(&luma_of(&cand));
+        let keep = pk1 < pk0 * crate::prefilter::LF_PEAK_DROP;
+        eprintln!(
+            "[stage] lf gate: peakiness {pk0:.1} -> {pk1:.1} (need <{:.1}) -> {}",
+            pk0 * crate::prefilter::LF_PEAK_DROP,
+            if keep { "apply" } else { "revert" }
+        );
+        if keep {
+            cand
+        } else {
+            pre
+        }
+    };
     let t_lf = t00.elapsed();
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         use crate::prefilter::{luma_of as _luma2, screen_band_energy as _sbe2};
