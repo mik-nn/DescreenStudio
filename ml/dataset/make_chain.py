@@ -52,11 +52,19 @@ from ml.preproc.edgenotch import adaptive_notch_rgb  # noqa: E402
 from ml.preproc.lfband import detect_lf_bands, subtract_lf_rgb  # noqa: E402
 from ml.preproc.run_p0 import build_notch_lists  # noqa: E402
 from ml.preproc.spectrum import estimate_raster, luma  # noqa: E402
-from ml.simulator.chain import ChainGeometry, build_chain_pair, chain_geometry  # noqa: E402
+from ml.simulator.chain import (  # noqa: E402
+    ChainGeometry, box_down_rgb, build_chain_pair, chain_geometry,
+)
 from ml.simulator.config import ScanConfig, preset  # noqa: E402
+
+from ml.preproc.v1 import V1Config, apply_v1, axis_peakiness, band_energy_native  # noqa: E402
 
 GT_PHOTOS = ROOT / "Data" / "gt" / "unsplash"
 GT_DOCS = ROOT / "Data" / "gt" / "documents"
+
+# Паритет с `prefilter::LF_PEAK_DROP` (Rust): LF применяется, только если
+# пиковость осевой полосы упала хотя бы на 15%.
+LF_PEAK_DROP = 0.85
 
 # Пресет -> линиатура. Диапазоны выведены из 11 приёмочных сканов
 # (r = 0.099..0.146 при 800/1200 dpi), а не из каталога пресетов.
@@ -112,23 +120,44 @@ def crop_at(path: str, w: int, h: int, rng: random.Random) -> np.ndarray:
     return arr
 
 
-def prefilter_chain(scan_chain: np.ndarray) -> tuple[np.ndarray, dict]:
-    """Прод-пре-стейдж на chain-кадре: A0 -> adaptive notch -> LF."""
+def prefilter_chain(scan_chain: np.ndarray, v1_acted: bool = False,
+                    v1_info: dict | None = None) -> tuple[np.ndarray, dict]:
+    """Прод-пре-стейдж ПОСЛЕ V1 и даунсэмпла: A0 -> notch -> LF с гейтом.
+
+    V1 применяется раньше и в нативном разрешении (`make_one`), как в
+    `descreen_file`; здесь только то, что идёт после Найквист-нормализации.
+    """
     cfg = _cfg_once()
-    est = estimate_raster(luma(scan_chain), cfg.spectrum)
-    peaks = build_notch_lists(scan_chain, cfg, cfg.spectrum.measure_roi)
-    pre, _cmap = adaptive_notch_rgb(
-        scan_chain, peaks, cfg.edge_notch, cfg.edge_notch.radius_ref_roi
-    )
+    info: dict = dict(v1_info or {})
+    cur = scan_chain
+    est = estimate_raster(luma(cur), cfg.spectrum)
+    peaks = build_notch_lists(cur, cfg, cfg.spectrum.measure_roi)
+    if v1_acted:
+        pre = cur
+        info["notch"] = "skipped(v1)"
+    else:
+        pre, _cmap = adaptive_notch_rgb(
+            cur, peaks, cfg.edge_notch, cfg.edge_notch.radius_ref_roi
+        )
+        info["notch"] = "applied"
     bands = detect_lf_bands(luma(pre), cfg.lf)
-    pre = subtract_lf_rgb(pre, bands, cfg.lf)
-    return pre, {
+    if bands:
+        cand = subtract_lf_rgb(pre, bands, cfg.lf)
+        pk0 = axis_peakiness(luma(pre))
+        pk1 = axis_peakiness(luma(cand))
+        keep = pk1 < pk0 * LF_PEAK_DROP
+        info["lf_gate"] = [round(pk0, 1), round(pk1, 1), bool(keep)]
+        pre = cand if keep else pre
+    else:
+        info["lf_gate"] = None
+    info.update({
         "a0_r": round(float(est.r), 5),
         "a0_angle": round(float(est.angle_deg), 2),
         "a0_conf": round(float(est.confidence), 4),
         "n_peaks": [len(p) for p in peaks],
         "lf_bands": [[round(b.r, 5), b.axis] for b in bands],
-    }
+    })
+    return pre, info
 
 
 def make_one(spec: dict) -> dict:
@@ -189,9 +218,28 @@ def make_one(spec: dict) -> dict:
         gt_crop, geom, pcfg, scfg, sparams, ghost=ghost
     )
     scan_native_saved = scan_native if spec.get("keep_native") else None
-    del gt_native
 
-    pre, pinfo = prefilter_chain(scan_chain)
+    # V1 в НАТИВНОМ разрешении, до Найквист-даунсэмпла — как в продукте.
+    # Вход сети обязан совпадать с тем, что видит инференс (JOURNAL 2.32–2.34).
+    v1_info: dict = {}
+    scan_v1 = scan_native
+    if spec.get("v1", True):
+        band0 = band_energy_native(scan_native, geom.r)
+        scan_v1, v1_rep = apply_v1(scan_native, geom.r, V1Config(), _cfg_once())
+        band1 = band_energy_native(scan_v1, geom.r)
+        v1_info = {
+            "v1_acted": bool(v1_rep["acted"]),
+            "v1_coh": round(float(v1_rep["coh"]), 3),
+            "v1_carriers": v1_rep["carriers"],
+            "v1_band_drop": round(100.0 * (1.0 - band1 / max(band0, 1e-30)), 1),
+        }
+    pre, pinfo = prefilter_chain(
+        box_down_rgb(scan_v1, geom.chain_w, geom.chain_h),
+        v1_acted=bool(v1_info.get("v1_acted")),
+        v1_info=v1_info,
+    )
+    gt_chain = box_down_rgb(gt_native, geom.chain_w, geom.chain_h)
+    scan_chain = box_down_rgb(scan_native, geom.chain_w, geom.chain_h)
 
     pid = spec["id"]
     scan_dir, gt_dir, raw_dir = (Path(spec["out"]) / "scan", Path(spec["out"]) / "gt",
