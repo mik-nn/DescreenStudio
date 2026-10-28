@@ -29,6 +29,13 @@ class PrintConfig:
     ellipse_ratio: float = 0.7
     tvi_gain: float = 0.6
     optical_blur_sigma: float = 0.6
+    # Приводка и коробление: у реальных красок своё начало решётки и медленный
+    # дрейф по листу. Без них все плиты идеально когерентны, межкрасочные
+    # биения усиливаются до уровня несущей и детектор растра (A0) уходит на
+    # биение вместо несущей. Ноль сохраняет прежнее поведение симулятора.
+    registration_px_max: float = 0.0  # постоянный сдвиг плиты, px печати
+    warp_amp_px: float = 0.0  # амплитуда медленного дрейфа, px печати
+    warp_corr_px: int = 256  # корреляционная длина дрейфа, px печати
     paper_texture: float = 0.06
     paper_tint: tuple[float, float, float] = (1.0, 1.0, 1.0)  # aged-paper RGB multiplier
     ink_set: str = "cmyk"  # cmyk | k (mono) | duotone (k + spot gray)

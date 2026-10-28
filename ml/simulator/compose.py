@@ -5,7 +5,7 @@ from PIL import Image
 
 from ml.simulator.color import separate_rgb
 from ml.simulator.config import PrintConfig
-from ml.simulator.screen import halftone_channel
+from ml.simulator.screen import apply_tvi, halftone_channel
 
 
 def _paper_texture(h: int, w: int, strength: float, rng: np.random.Generator) -> np.ndarray:
@@ -71,7 +71,40 @@ def print_masks(gt: np.ndarray, cfg: PrintConfig) -> dict[str, np.ndarray]:
     return out
 
 
-def simulate_print(gt: np.ndarray, cfg: PrintConfig) -> np.ndarray:
+def _compose(
+    paper_rgb: np.ndarray, plates: dict[str, np.ndarray], cfg: PrintConfig
+) -> np.ndarray:
+    """Ink composition from per-plate coverage in [0, 1] (halftone mask or
+    continuous tone — the same multiplicative model serves both)."""
+    one = np.ones_like(plates["k"])
+    if cfg.ink_set == "k":
+        gray = paper_rgb[..., 0] * (one - plates["k"])
+        rgb = np.stack([gray, gray, gray], axis=-1)
+    elif cfg.ink_set == "duotone":
+        v = paper_rgb[..., 0] * (one - plates["k"]) * (one - 0.5 * plates["s"])
+        rgb = np.stack([v, v, v], axis=-1)
+    else:
+        r = paper_rgb[..., 0] * (one - plates["c"]) * (one - plates["k"])
+        g = paper_rgb[..., 1] * (one - plates["m"]) * (one - plates["k"])
+        b = paper_rgb[..., 2] * (one - plates["y"]) * (one - plates["k"])
+        rgb = np.stack([r, g, b], axis=-1)
+    return np.clip(rgb, 0.0, 1.0).astype(np.float32)
+
+
+def simulate_print_pair(
+    gt: np.ndarray, cfg: PrintConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """(растрированный оттиск, контонный оттиск) из одного физического состояния.
+
+    Обе картинки делят сепарацию, TVI и бумагу (тот же rng-порядок, что в
+    `simulate_print`), поэтому интегрирующий даунсэмпл даёт одну и ту же
+    низкочастотную основу: различается только растровая маска.
+
+    Контонный оттиск — это тот же оттиск без растра: вместо покрытия точки
+    берётся эффективное покрытие `apply_tvi(tone)`. Это и есть корректный
+    GT для сети при chain-разрешении (задача — убрать растр, а не обратить
+    сепарацию, TVI, бумагу и цвет).
+    """
     gt = np.clip(gt.astype(np.float32), 0.0, 1.0)
     h, w, _ = gt.shape
     s = cfg.oversample
@@ -83,22 +116,14 @@ def simulate_print(gt: np.ndarray, cfg: PrintConfig) -> np.ndarray:
     ) / 255.0
     inks = _separate(big, cfg)
     rng = np.random.default_rng(cfg.seed)
-    masks = {}
+    masks: dict[str, np.ndarray] = {}
     for ch in inks:
         ang = cfg.angles_deg[ch] if ch in cfg.angles_deg else _FALLBACK_ANGLES[ch]
         masks[ch] = halftone_channel(inks[ch], cfg, ang, rng)
     paper_rgb = _tinted_paper(h, w, s, cfg.paper_texture, cfg.paper_tint, rng)
-    one = np.ones_like(masks["k"])
-    if cfg.ink_set == "k":
-        gray = paper_rgb[..., 0] * (one - masks["k"])
-        rgb = np.stack([gray, gray, gray], axis=-1)
-    elif cfg.ink_set == "duotone":
-        v = paper_rgb[..., 0] * (one - masks["k"]) * (one - 0.5 * masks["s"])
-        rgb = np.stack([v, v, v], axis=-1)
-    else:
-        r = paper_rgb[..., 0] * (one - masks["c"]) * (one - masks["k"])
-        g = paper_rgb[..., 1] * (one - masks["m"]) * (one - masks["k"])
-        b = paper_rgb[..., 2] * (one - masks["y"]) * (one - masks["k"])
-        rgb = np.stack([r, g, b], axis=-1)
-    rgb = np.clip(rgb, 0.0, 1.0)
-    return rgb.astype(np.float32)
+    contone = {ch: apply_tvi(v, cfg.tvi_gain) for ch, v in inks.items()}
+    return _compose(paper_rgb, masks, cfg), _compose(paper_rgb, contone, cfg)
+
+
+def simulate_print(gt: np.ndarray, cfg: PrintConfig) -> np.ndarray:
+    return simulate_print_pair(gt, cfg)[0]
