@@ -29,6 +29,8 @@
 
 **Артефакты:** `ml/preproc/v1.py`, `ml/dataset/make_chain.py`, `Temp/dataset_gap.py`, `Data/chain_pilot_v1/` (16 пар с манифестом), `Data/chain_v1test2/`.
 
+**Далее (подготовлено):** полная генерация `Data/chain_v1` (1500 train + 150 val, 10 воркеров, ~5 ч) запущена; дообучение — `ml/train/finetune_chain_v1.ps1` (warm start `_run27_hyb/best.pt`, lr 1e-5, 2 эпохи, batch 2 + grad-accum 2, кадр 512×1024). Проверено на GPU: forward 512×1024 проходит, batch 2 занимает 2.6 ГБ активаций на инференсе (обучение ≈ в 3–4 раза больше, 16 ГБ VRAM хватает только на batch 2 — batch 4 не влезет).
+
 ---
 
 ## 2026-10-28 — 2.35 НЧ-«муар» оказался контентом: LF-стадия гейтится по факту периодичности
