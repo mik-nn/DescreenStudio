@@ -82,16 +82,10 @@ impl CandleEngine {
         let stride = tile.saturating_sub(tp.overlap);
         assert!(stride >= 2, "overlap must be < tile");
 
-        let ty = ((h as isize - tile as isize) as f64 / stride as f64).ceil().max(0.0) as usize;
-        let tx = ((w as isize - tile as isize) as f64 / stride as f64).ceil().max(0.0) as usize;
-        let ph = ty * stride + tile;
-        let pw = tx * stride + tile;
-        let mut padded = Array4::<f32>::zeros((1, c, ph, pw));
-        {
-            let mut dst = padded.slice_mut(s![0, .., 0..h, 0..w]);
-            dst.assign(img);
-        }
-        pad_replicate_edges(&mut padded, h, w);
+        // Паддинг со всех сторон (общий helper с ORT-путём): крайние пиксели
+        // кадра обязаны попадать внутрь тайла, иначе окно Ханна даёт вес 0 и
+        // на краю появляется чёрная рамка.
+        let (padded, pad, ph, pw) = crate::inference::pad_for_tiling(img, tile, tp.overlap);
 
         let (mut acc, mut weight) = (Array3::<f32>::zeros((c, ph, pw)), array2_zeros(ph, pw));
 
@@ -139,15 +133,6 @@ impl CandleEngine {
             on_tile(done, total);
         }
 
-        let mut result = Array3::<f32>::zeros((c, h, w));
-        for i in 0..c {
-            for y in 0..h {
-                for x in 0..w {
-                    let wt = weight[[0, y, x]];
-                    result[[i, y, x]] = (acc[[i, y, x]] / wt.max(f32::EPSILON)).clamp(0.0, 1.0);
-                }
-            }
-        }
-        Ok(result)
+        Ok(crate::inference::finish_tiled(&acc, &weight, pad, h, w))
     }
 }

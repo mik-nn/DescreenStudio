@@ -109,18 +109,37 @@ impl InferenceEngine {
         let stride = tile.saturating_sub(tp.overlap);
         assert!(stride >= 2, "overlap must be < tile");
 
-        // Replicate-pad so the tile grid ends exactly at the padded edge and
-        // every real pixel is covered by an interior window.
-        let ty = ((h as isize - tile as isize) as f64 / stride as f64).ceil().max(0.0) as usize;
-        let tx = ((w as isize - tile as isize) as f64 / stride as f64).ceil().max(0.0) as usize;
-        let ph = ty * stride + tile;
-        let pw = tx * stride + tile;
+        // Паддинг со ВСЕХ сторон на величину перекрытия.
+        //
+        // Раньше кадр добивался только справа/снизу до кратности шагу, поэтому
+        // крайние пиксели кадра попадали в тайл, где окно Ханна равно нулю:
+        // вес = 0, деление на EPSILON давало 0 (чёрная рамка), а краевые
+        // артефакты модели ничем не перекрывались. Замер: у run27 на Pack
+        // row0 = col0 = 0.0 против 0.21 в глубине кадра.
+        // Теперь (0,0) кадра лежит на `pad` пикселей внутри тайла и покрыт
+        // окном с ненулевым весом.
+        let pad = tp.overlap.max(32);
+        let inner_h = h + 2 * pad;
+        let inner_w = w + 2 * pad;
+        let ty = ((inner_h as isize - tile as isize) as f64 / stride as f64)
+            .ceil()
+            .max(0.0) as usize;
+        let tx = ((inner_w as isize - tile as isize) as f64 / stride as f64)
+            .ceil()
+            .max(0.0) as usize;
+        let ph = (ty * stride + tile).max(inner_h);
+        let pw = (tx * stride + tile).max(inner_w);
         let mut padded = Array4::<f32>::zeros((1, c, ph, pw));
-        {
-            let mut dst = padded.slice_mut(s![0, .., 0..h, 0..w]);
-            dst.assign(img);
+        // Зеркальная (replicate) заливка всей паддированной области из кадра.
+        for y in 0..ph {
+            let sy = (y as isize - pad as isize).clamp(0, h as isize - 1) as usize;
+            for x in 0..pw {
+                let sx = (x as isize - pad as isize).clamp(0, w as isize - 1) as usize;
+                for i in 0..c {
+                    padded[[0, i, y, x]] = img[[i, sy, sx]];
+                }
+            }
         }
-        pad_replicate_edges(&mut padded, h, w);
 
         let (mut acc, mut weight) = (Array3::<f32>::zeros((c, ph, pw)), array2_zeros(ph, pw));
 
@@ -145,8 +164,9 @@ impl InferenceEngine {
         for i in 0..c {
             for y in 0..h {
                 for x in 0..w {
-                    let wt = weight[[0, y, x]];
-                    result[[i, y, x]] = (acc[[i, y, x]] / wt.max(f32::EPSILON)).clamp(0.0, 1.0);
+                    let wt = weight[[0, y + pad, x + pad]];
+                    result[[i, y, x]] =
+                        (acc[[i, y + pad, x + pad]] / wt.max(f32::EPSILON)).clamp(0.0, 1.0);
                 }
             }
         }
@@ -179,6 +199,69 @@ pub(crate) fn pad_replicate_edges(arr: &mut Array4<f32>, h: usize, w: usize) {
 }
 
 /// Weighted accumulate of one output tile with its separable Hann window.
+/// Паддинг кадра для тайлового инференса: со ВСЕХ сторон на `pad`, затем до
+/// кратности шагу. Возвращает (padded, pad, ph, pw).
+///
+/// Зачем со всех сторон: крайние пиксели кадра иначе попадают в тайл, где окно
+/// Ханна равно нулю (вес 0 → деление на EPSILON → чёрная рамка), а краевые
+/// артефакты модели ничем не перекрываются. Замер: run27 на Pack давал
+/// row0 = col0 = 0.0 против 0.21 в глубине кадра.
+///
+/// Общая функция обязательна: ORT- и Candle-пути раньше дублировали этот код,
+/// и правка в одном оставляла баг в другом.
+pub(crate) fn pad_for_tiling(
+    img: &Array3<f32>,
+    tile: usize,
+    overlap: usize,
+) -> (Array4<f32>, usize, usize, usize) {
+    let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
+    let stride = tile.saturating_sub(overlap).max(2);
+    let pad = overlap.max(32);
+    let inner_h = h + 2 * pad;
+    let inner_w = w + 2 * pad;
+    let ty = ((inner_h as isize - tile as isize) as f64 / stride as f64)
+        .ceil()
+        .max(0.0) as usize;
+    let tx = ((inner_w as isize - tile as isize) as f64 / stride as f64)
+        .ceil()
+        .max(0.0) as usize;
+    let ph = (ty * stride + tile).max(inner_h);
+    let pw = (tx * stride + tile).max(inner_w);
+    let mut padded = Array4::<f32>::zeros((1, c, ph, pw));
+    for y in 0..ph {
+        let sy = (y as isize - pad as isize).clamp(0, h as isize - 1) as usize;
+        for x in 0..pw {
+            let sx = (x as isize - pad as isize).clamp(0, w as isize - 1) as usize;
+            for i in 0..c {
+                padded[[0, i, y, x]] = img[[i, sy, sx]];
+            }
+        }
+    }
+    (padded, pad, ph, pw)
+}
+
+/// Сборка результата из накопленных сумм: деление на вес и обрезка паддинга.
+pub(crate) fn finish_tiled(
+    acc: &Array3<f32>,
+    weight: &Array3<f32>,
+    pad: usize,
+    h: usize,
+    w: usize,
+) -> Array3<f32> {
+    let c = acc.shape()[0];
+    let mut result = Array3::<f32>::zeros((c, h, w));
+    for i in 0..c {
+        for y in 0..h {
+            for x in 0..w {
+                let wt = weight[[0, y + pad, x + pad]];
+                result[[i, y, x]] =
+                    (acc[[i, y + pad, x + pad]] / wt.max(f32::EPSILON)).clamp(0.0, 1.0);
+            }
+        }
+    }
+    result
+}
+
 pub(crate) fn accumulate(acc: &mut Array3<f32>, out: &ndarray::ArrayView3<f32>, weight: &mut Array3<f32>, y0: usize, x0: usize, tile: usize) {
     // Hann window, 1-D, period length tile (matches v3.7 export path).
     let win1d: Vec<f32> = (0..tile)
