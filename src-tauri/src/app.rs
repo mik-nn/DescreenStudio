@@ -236,7 +236,7 @@ pub fn descreen_file(
     // 2 px (r=0.5), вся цепочка работает в этом разрешении, результат
     // возвращается в исходный размер (Lanczos3).
     let nyq = if nyquist {
-        crate::nyquist::plan(&img, &pcfg)
+        crate::nyquist::plan_with(&img, &pcfg, &crate::nyquist::NyqCfg::from_env())
     } else {
         crate::nyquist::NyquistPlan {
             r_in: 0.0,
@@ -314,7 +314,28 @@ pub fn descreen_file(
     );
     engine.set_cond(Some(cond));
     let t00 = Instant::now();
-    let peaks = build_notch_lists(&img, &pcfg, 1024);
+    let mut peaks = build_notch_lists(&img, &pcfg, 1024);
+    // 2.40: в Найквист-режиме несущая в рабочем кадре ИЗВЕСТНА по построению
+    // (r_out), а A0 на этом кадре читает ложный пик (Pack: 0.4258 вместо 0.30),
+    // из-за чего notch промахивался и остаток растра доживал до выхода.
+    // DESCREEN_NOTCH_R фиксирует радиус несущей, сохраняя углы и гармоники.
+    if let Ok(v) = std::env::var("DESCREEN_NOTCH_R") {
+        if let Ok(want) = v.parse::<f32>() {
+            for list in peaks.iter_mut() {
+                if let Some(&(r0, _)) = list.first() {
+                    if r0 > 1e-4 {
+                        let k = want / r0;
+                        for p in list.iter_mut() {
+                            p.0 = (p.0 * k).clamp(0.02, 0.48);
+                        }
+                    }
+                }
+            }
+            if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+                eprintln!("[stage] notch r override -> {want:.4}");
+            }
+        }
+    }
     let t_measure = t00.elapsed();
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         use crate::prefilter::{luma_of as _luma, screen_band_energy as _sbe};
@@ -335,12 +356,29 @@ pub fn descreen_file(
         _ => v1_acted,
     };
     let t00 = Instant::now();
-    let pre = if skip_notch {
+    let mut pre = if skip_notch {
         eprintln!("[stage] notch: skipped (v1_acted={v1_acted} mode={notch_mode})");
         img.clone()
     } else {
         adaptive_notch(&img, &peaks, &pcfg)
     };
+    // 2.40: кольцевой notch по известной несущей. В Найквист-режиме частота
+    // растра в рабочем кадре задана планом (r_out), и остаток V1 + его AM-
+    // боковые полосы обязаны уйти, иначе они ложатся в видимую полосу и
+    // усиливаются unsharp-ом (Pack: 4.28 % модуляции против 3.12 % в скане).
+    if std::env::var("DESCREEN_RING").map(|v| v != "0").unwrap_or(false) && nyq_active {
+        let bw = std::env::var("DESCREEN_RING_BW")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.02);
+        let stage = std::env::var("DESCREEN_RING_STAGE").unwrap_or_else(|_| "both".into());
+        if stage != "post" {
+            pre = crate::prefilter::ring_notch(&pre, nyq.r_out, bw, 4);
+        }
+        if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+            eprintln!("[stage] ring notch: r={:.4} bw={:.3} stage={}", nyq.r_out, bw, stage);
+        }
+    }
     let t_notch = t00.elapsed();
     if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         // intermediate dump: notch stage output (border coverage diagnostics)
@@ -480,17 +518,24 @@ pub fn descreen_file(
     let t00 = Instant::now();
     let k_final = if backoff_fired { pcfg.backoff_w } else { 1.0 };
     let no_unsharp = std::env::var_os("DESCREEN_NO_UNSHARP").is_some();
+    // Потолок amount: DESCREEN_US_MAX (по умолчанию AMOUNT_MAX). Петля целится
+    // в sharp=1.0 относительно скана, а в Найквист-режиме эта цель держится
+    // остатком растра — без потолка она раздувает полосу 0.02–0.08 (2.39).
+    let us_max = std::env::var("DESCREEN_US_MAX")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(crate::unsharp::AMOUNT_MAX);
     let (mut toned, mut us_amount, mut us_sharp) = if no_unsharp {
         (toned, 0.0f32, 0.0f32)
     } else {
-        crate::unsharp::adaptive_unsharp(&toned, &img)
+        crate::unsharp::adaptive_unsharp_cap(&toned, &img, us_max)
     };
     let mut b_used = b;
     if !no_unsharp && us_sharp < 0.90 && b > 0.4 {
         let (orig_sharp, orig_amt) = (us_sharp, us_amount);
         for bf in [0.4f32, 0.15] {
             let t2 = finish(&out, k_final, bf);
-            let (o2, a2, s2) = crate::unsharp::adaptive_unsharp(&t2, &img);
+            let (o2, a2, s2) = crate::unsharp::adaptive_unsharp_cap(&t2, &img, us_max);
             if s2 > us_sharp {
                 toned = o2;
                 us_amount = a2;
@@ -508,6 +553,22 @@ pub fn descreen_file(
         }
     }
     let t_unsharp = t00.elapsed();
+    // 2.40: финальная зачистка несущей. unsharp (σ=1) усиливает остаток на
+    // r_out в ≈1.4× (Pack: пре 1.55 % -> после unsharp 1.94 %), поэтому кольцо
+    // вырезается ещё раз уже в готовом кадре.
+    if nyq_active
+        && std::env::var("DESCREEN_RING").map(|v| v != "0").unwrap_or(false)
+        && std::env::var("DESCREEN_RING_STAGE").unwrap_or_else(|_| "both".into()) != "pre"
+    {
+        let bw = std::env::var("DESCREEN_RING_BW")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.02);
+        toned = crate::prefilter::ring_notch(&toned, nyq.r_out, bw, 4);
+        if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+            eprintln!("[stage] ring notch (post): r={:.4} bw={:.3}", nyq.r_out, bw);
+        }
+    }
     eprintln!(
         "[timing] measure={:.1}s notch={:.1}s lf={:.1}s finish={:.1}s unsharp={:.1}s",
         t_measure.as_secs_f64(),

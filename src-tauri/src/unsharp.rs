@@ -141,13 +141,26 @@ pub fn adaptive_unsharp(
     img: &Array3<f32>,
     src: &Array3<f32>,
 ) -> (Array3<f32>, f32, f32) {
+    adaptive_unsharp_cap(img, src, AMOUNT_MAX)
+}
+
+/// То же с внешним потолком amount. В Найквист-режиме цель SHARP_TARGET
+/// недостижима: лапласиан скана на рабочем разрешении держится остатком
+/// растра (2.39: полоса 0.02–0.08 раздувалась в 2.6–6.2×) — петля упирается
+/// в потолок и «пластифицирует» картинку, поэтому потолок задаётся снаружи.
+pub fn adaptive_unsharp_cap(
+    img: &Array3<f32>,
+    src: &Array3<f32>,
+    amount_max: f32,
+) -> (Array3<f32>, f32, f32) {
+    let amount_max = amount_max.clamp(0.0, AMOUNT_MAX);
     let src_l = crate::prefilter::luma_of(src);
     let out_l = |a: &Array3<f32>| crate::prefilter::luma_of(a);
     let r0 = sharp_ratio(&src_l, &out_l(img));
-    if r0 >= SHARP_TARGET - SHARP_TOL {
+    if r0 >= SHARP_TARGET - SHARP_TOL || amount_max <= 0.0 {
         return (img.clone(), 0.0, r0);
     }
-    let mut amount = 0.5f32;
+    let mut amount = 0.5f32.min(amount_max);
     let mut best = img.clone();
     let mut best_d = (r0 - SHARP_TARGET).abs();
     for _ in 0..MAX_ITERS {
@@ -162,11 +175,11 @@ pub fn adaptive_unsharp(
             return (cand, amount, r);
         }
         if r < SHARP_TARGET {
-            amount = (AMOUNT_MAX).min(amount * AMOUNT_STEP);
+            amount = amount_max.min(amount * AMOUNT_STEP);
         } else {
             amount /= AMOUNT_STEP;
         }
-        if amount >= AMOUNT_MAX && r < SHARP_TARGET {
+        if amount >= amount_max && r < SHARP_TARGET {
             break;
         }
     }

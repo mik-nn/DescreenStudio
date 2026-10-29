@@ -37,13 +37,18 @@ from ml.simulator.scan import rotate_rgb, sample_scan_params, simulate_scan
 
 @dataclass(frozen=True)
 class ChainGeometry:
-    """Физическая геометрия одного патча (кадр может быть не квадратным)."""
+    """Физическая геометрия одного патча (кадр может быть не квадратным).
+
+    `r_out` — целевая частота растра в рабочем кадре (цикл/px, Найквист 0.5).
+    0.5 — предел Котельникова (период 2 px), 0.3 — полоса шире в 1.67 раза.
+    """
 
     lpi: float
     scan_dpi: int
     print_dpi: int
     chain_h: int
     chain_w: int
+    r_out: float = 0.5
 
     @property
     def r(self) -> float:
@@ -52,16 +57,21 @@ class ChainGeometry:
 
     @property
     def scale(self) -> float:
-        """Линейный масштаб Найквист-нормализации (scale = 2r)."""
-        return 2.0 * self.r
+        """Линейный масштаб нормализации (scale = r / r_out)."""
+        return self.r / self.r_out
+
+    @property
+    def chain_dpi(self) -> float:
+        """Разрешение рабочего кадра: период растра = 1/r_out px."""
+        return self.lpi / self.r_out
 
     @property
     def inches_h(self) -> float:
-        return self.chain_h / (2.0 * self.lpi)
+        return self.chain_h / self.chain_dpi
 
     @property
     def inches_w(self) -> float:
-        return self.chain_w / (2.0 * self.lpi)
+        return self.chain_w / self.chain_dpi
 
     @property
     def scan_h(self) -> int:
@@ -85,19 +95,23 @@ class ChainGeometry:
                 f"r={self.r:.4f} вне рабочего диапазона 0.05..0.24 "
                 f"(реальные сканы 0.099..0.146, выше — уже почти Найквист)"
             )
+        if not 0.15 <= self.r_out <= 0.5:
+            raise ValueError(f"r_out={self.r_out:.3f} вне 0.15..0.5")
         for name, n_scan, n_chain in (("h", self.scan_h, self.chain_h),
                                       ("w", self.scan_w, self.chain_w)):
             if abs(n_scan * self.scale - n_chain) > 1.5:
                 raise ValueError(
-                    f"геометрия не сходится по {name}: scan*2r={n_scan * self.scale:.1f} "
+                    f"геометрия не сходится по {name}: scan*scale={n_scan * self.scale:.1f} "
                     f"vs chain={n_chain}"
                 )
 
 
 def chain_geometry(lpi: float, scan_dpi: int, print_dpi: int, chain_h: int,
-                   chain_w: int | None = None) -> ChainGeometry:
+                   chain_w: int | None = None, r_out: float = 0.5) -> ChainGeometry:
     g = ChainGeometry(lpi=float(lpi), scan_dpi=int(scan_dpi), print_dpi=int(print_dpi),
-                      chain_h=int(chain_h), chain_w=int(chain_w if chain_w is not None else chain_h))
+                      chain_h=int(chain_h),
+                      chain_w=int(chain_w if chain_w is not None else chain_h),
+                      r_out=float(r_out))
     g.validate()
     return g
 
@@ -188,9 +202,9 @@ def angle_band_tolerance(lpi: float, scan_dpi: int, chain_px: int) -> float:
     return 1.0 / chain_px
 
 
-def expected_chain_r(lpi: float, scan_dpi: int) -> float:
-    """r растра в chain-домене после нормализации scale = 2r (цель 0.5)."""
-    return lpi / scan_dpi / (2.0 * lpi / scan_dpi)
+def expected_chain_r(lpi: float, scan_dpi: int, r_out: float = 0.5) -> float:
+    """r растра в chain-домене после нормализации scale = r/r_out."""
+    return lpi / scan_dpi / (lpi / scan_dpi / r_out)
 
 
 def lpi_for_r(r: float, scan_dpi: int) -> float:
@@ -198,13 +212,14 @@ def lpi_for_r(r: float, scan_dpi: int) -> float:
 
 
 def geometry_table(scan_dpi: int, chain_h: int, chain_w: int, lpis: list[float],
-                   print_dpi: int) -> list[dict]:
+                   print_dpi: int, r_out: float = 0.5) -> list[dict]:
     rows = []
     for lpi in lpis:
-        g = chain_geometry(lpi, scan_dpi, print_dpi, chain_h, chain_w)
+        g = chain_geometry(lpi, scan_dpi, print_dpi, chain_h, chain_w, r_out=r_out)
         rows.append({
             "lpi": round(lpi, 1),
             "r": round(g.r, 4),
+            "r_out": round(g.r_out, 4),
             "scale": round(g.scale, 4),
             "inches": [round(g.inches_h, 3), round(g.inches_w, 3)],
             "scan_px": [g.scan_h, g.scan_w],

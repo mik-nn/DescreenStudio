@@ -170,6 +170,7 @@ def make_one(spec: dict) -> dict:
         print_dpi=spec["print_dpi"],
         chain_h=spec["chain_h"],
         chain_w=spec["chain_w"],
+        r_out=spec.get("r_out", 0.5),
     )
     scan_h, scan_w = geom.scan_h, geom.scan_w
 
@@ -280,6 +281,7 @@ def make_one(spec: dict) -> dict:
         "print_dpi": spec["print_dpi"],
         "lpi": round(spec["lpi"], 2),
         "r": round(geom.r, 5),
+        "r_out": round(geom.r_out, 4),
         "scale": round(geom.scale, 5),
         "inches": [round(geom.inches_h, 3), round(geom.inches_w, 3)],
         "chain": [geom.chain_h, geom.chain_w],
@@ -319,6 +321,10 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
             scan_dpi = int(args.dpi_force or scan_dpi)
             lpi = rng.uniform(r_lo, r_hi) * scan_dpi
         angle = rng.uniform(0.1, 2.0)
+        r_out = args.r_out
+        if args.r_out_jitter > 0:
+            r_out = rng.uniform(max(0.15, r_out - args.r_out_jitter),
+                                min(0.5, r_out + args.r_out_jitter))
         plan.append({
             "id": f"{profile[0]}{start + i:05d}",
             "profile": profile,
@@ -328,6 +334,7 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
             "print_dpi": args.print_dpi,
             "chain_h": args.chain_h,
             "chain_w": args.chain_w,
+            "r_out": round(r_out, 4),
             "preset": preset_name,
             "lpi": round(lpi, 2),
             "ink_set": pick_weighted(rng, INK_WEIGHTS),
@@ -393,6 +400,10 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--chain-w", type=int, default=1024, help="ширина chain-кадра, px")
     ap.add_argument("--chain-h", type=int, default=512, help="высота chain-кадра, px")
+    ap.add_argument("--r-out", type=float, default=0.5,
+                    help="частота растра в рабочем кадре (0.5 = Котельников, 2 px)")
+    ap.add_argument("--r-out-jitter", type=float, default=0.0,
+                    help="разброс r_out в обе стороны (устойчивость сети к оценке растра)")
     ap.add_argument("--print-dpi", type=int, default=2400)
     ap.add_argument("--dpi-force", type=int, default=None)
     ap.add_argument("--lpi-min", type=float, default=None)

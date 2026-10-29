@@ -643,6 +643,41 @@ fn apply_mask_rect(plane: &mut [f32], h: usize, w: usize, mask: &[f32]) {
     }
 }
 
+/// Кольцевой notch по всей плоскости: полоса |f| ∈ r ± bw глушится
+/// Butterworth-ом порядка `order`.
+///
+/// Зачем отдельно от `adaptive_notch`: в Найквист-режиме несущая в рабочем
+/// кадре известна по построению (`r_out = r_in / scale`), а точечный notch по
+/// пикам A0 её не берёт — A0 читает диагональную гармонику (Pack: 0.4258 =
+/// √2·0.30, спектр рабочего кадра: 0.425 @ 2330× против 0.301 @ 2048×), а
+/// AM-боковые полосы вообще не ложатся в точки. Замер 2.40: точечный notch
+/// оставлял 4.13 % модуляции (неотличимо от «пропущено»), кольцо 0.30±0.02 —
+/// 1.55 % при потере 5 % резкости.
+pub fn ring_notch(img: &Array3<f32>, r: f32, bw: f32, order: i32) -> Array3<f32> {
+    let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
+    let (hc, wc) = (h as f32 / 2.0, w as f32 / 2.0);
+    let mut mask = vec![1.0f32; h * w];
+    for y in 0..h {
+        let fy = (y as f32 - hc) / h as f32;
+        for x in 0..w {
+            let fx = (x as f32 - wc) / w as f32;
+            let d = (fx * fx + fy * fy).sqrt();
+            let t = (d - r).abs() / bw.max(1e-4);
+            let gain = 1.0 / (1.0 + t.powi(2 * order));
+            mask[y * w + x] = 1.0 - gain;
+        }
+    }
+    let mut out = Array3::<f32>::zeros((c, h, w));
+    for ci in 0..c {
+        let mut plane: Vec<f32> = (0..h * w).map(|i| img[[ci, i / w, i % w]]).collect();
+        apply_mask_rect(&mut plane, h, w, &mask);
+        for i in 0..h * w {
+            out[[ci, i / w, i % w]] = plane[i];
+        }
+    }
+    out
+}
+
 fn hann_1d(n: usize) -> Vec<f32> {
     (0..n)
         .map(|i| 0.5 * (1.0 - (2.0 * PI * i as f32 / (n - 1) as f32).cos()))

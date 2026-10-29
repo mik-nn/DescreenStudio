@@ -130,6 +130,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         let tp = TileParams { tile, overlap };
         let nyquist = std::env::var("DESCREEN_NYQUIST").is_ok();
         let v1 = std::env::var("DESCREEN_V1").map(|v| v != "0").unwrap_or(false);
+        // --probe-plan: только печать плана нормализации (без инференса).
+        if std::env::var_os("DESCREEN_PLAN_ONLY").is_some() {
+            let img = load_image(&path)?;
+            let pcfg = descreen_studio::prefilter::PrefilterCfg::default();
+            let cfg = descreen_studio::nyquist::NyqCfg::from_env();
+            let p = descreen_studio::nyquist::plan_with(&img, &pcfg, &cfg);
+            println!(
+                "plan r_in={:.4} conf={:.3} scale={:.4} out={}x{} r_out={:.4} iters={} target={:.2}",
+                p.r_in, p.conf_in, p.scale, p.out_w, p.out_h, p.r_out, p.iters, cfg.r_out
+            );
+            return Ok(());
+        }
         let mut last = (0usize, 0usize);
         let t0 = Instant::now();
         let core = descreen_studio::app::descreen_file(
