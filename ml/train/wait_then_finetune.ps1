@@ -60,8 +60,9 @@ if ($trainCount -lt 1000 -or $valCount -lt 100) {
 }
 
 $env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONPATH = $Root
 $trainArgs = @(
-    "-X", "utf8", "ml/train/train.py",
+    "-X", "utf8", "-m", "ml.train.train",
     "--data", "Data/chain_v1",
     "--out", "ml/train/_chain_v1",
     "--epochs", "2",
@@ -69,16 +70,27 @@ $trainArgs = @(
     "--grad-accum", "2",
     "--lr", "1e-5",
     "--warm-start", "ml/train/_run27_hyb/best.pt",
+    # arch must match the warm-start checkpoint (run27: base=96)
+    "--arch-base", "96",
+    "--arch-levels", "3",
+    "--arch-bottleneck", "3",
+    "--arch-enc-blocks", "1",
+    "--arch-dec-blocks", "1",
+    "--arch-spectral-l0", "0",
+    "--arch-plain", "0",
+    "--arch-spectral-mode", "plain",
+    "--ema-decay", "0.999",
+    "--seed", "52",
     "--cond", "1",
     "--cond-drop", "0.1",
     "--film-lr-mult", "5",
     "--root-weights", "chain_v1:1",
     "--val-every", "1",
-    "--val-max", "150",
     "--num-workers", "4",
     "--fourier-w", "0.05",
     "--lpips-w", "0.05",
     "--edge-w", "0.05",
+    "--edge-alpha", "2.0",
     "--tone-w", "0"
 )
 

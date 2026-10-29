@@ -21,7 +21,10 @@ $ErrorActionPreference = "Stop"
 Set-Location (Resolve-Path "$PSScriptRoot\..\..")
 
 $env:PYTHONIOENCODING = "utf-8"
-C:\Python314\python.exe -X utf8 ml/train/train.py `
+$env:PYTHONPATH = (Get-Location).Path
+# ВАЖНО: arch-параметры обязаны совпадать с чекпойнтом warm start (run27: base=96).
+# Без них подставляется base=64 и load_state_dict падает на size mismatch.
+C:\Python314\python.exe -X utf8 -m ml.train.train `
   --data Data/chain_v1 `
   --out ml/train/_chain_v1 `
   --epochs 2 `
@@ -29,8 +32,12 @@ C:\Python314\python.exe -X utf8 ml/train/train.py `
   --grad-accum 2 `
   --lr 1e-5 `
   --warm-start ml/train/_run27_hyb/best.pt `
+  --arch-base 96 --arch-levels 3 --arch-bottleneck 3 `
+  --arch-enc-blocks 1 --arch-dec-blocks 1 `
+  --arch-spectral-l0 0 --arch-plain 0 --arch-spectral-mode plain `
+  --ema-decay 0.999 --seed 52 `
   --cond 1 --cond-drop 0.1 --film-lr-mult 5 `
   --root-weights "chain_v1:1" `
-  --val-every 1 --val-max 150 `
+  --val-every 1 `
   --num-workers 4 `
-  --fourier-w 0.05 --lpips-w 0.05 --edge-w 0.05 --tone-w 0
+  --fourier-w 0.05 --lpips-w 0.05 --edge-w 0.05 --edge-alpha 2.0 --tone-w 0
