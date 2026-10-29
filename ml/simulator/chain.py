@@ -95,8 +95,8 @@ class ChainGeometry:
                 f"r={self.r:.4f} вне рабочего диапазона 0.05..0.24 "
                 f"(реальные сканы 0.099..0.146, выше — уже почти Найквист)"
             )
-        if not 0.15 <= self.r_out <= 0.5:
-            raise ValueError(f"r_out={self.r_out:.3f} вне 0.15..0.5")
+        if not 0.05 <= self.r_out <= 0.5:
+            raise ValueError(f"r_out={self.r_out:.3f} вне 0.05..0.5")
         for name, n_scan, n_chain in (("h", self.scan_h, self.chain_h),
                                       ("w", self.scan_w, self.chain_w)):
             if abs(n_scan * self.scale - n_chain) > 1.5:

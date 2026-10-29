@@ -322,7 +322,12 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
             lpi = rng.uniform(r_lo, r_hi) * scan_dpi
         angle = rng.uniform(0.1, 2.0)
         r_out = args.r_out
-        if args.r_out_jitter > 0:
+        if args.native_scale:
+            # Нативный режим: рабочий кадр = скан (scale 1.0), сеть видит растр
+            # с его настоящим периодом 4–10 px. Так продукт и работает при
+            # `r_out <= r_in`: даунсэмпла нет, апскейла нет — резкость 1:1.
+            r_out = lpi / scan_dpi
+        elif args.r_out_jitter > 0:
             r_out = rng.uniform(max(0.15, r_out - args.r_out_jitter),
                                 min(0.5, r_out + args.r_out_jitter))
         plan.append({
@@ -404,6 +409,8 @@ def main() -> None:
                     help="частота растра в рабочем кадре (0.5 = Котельников, 2 px)")
     ap.add_argument("--r-out-jitter", type=float, default=0.0,
                     help="разброс r_out в обе стороны (устойчивость сети к оценке растра)")
+    ap.add_argument("--native-scale", action="store_true",
+                    help="рабочий кадр = скан (scale 1.0): r_out = r каждого кадра")
     ap.add_argument("--print-dpi", type=int, default=2400)
     ap.add_argument("--dpi-force", type=int, default=None)
     ap.add_argument("--lpi-min", type=float, default=None)
