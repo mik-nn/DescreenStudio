@@ -51,6 +51,64 @@ class V1Config:
     harmonics: int = 1
     residual_iters: int = 3
     residual_min_ratio: float = 2.0
+    # Локальная подстройка фазы (JOURNAL 2.38): амплитуда оценивается проекцией
+    # на локальный фазор, а не усреднением комплексного произведения.
+    phase_lock: bool = False
+
+
+def subtract_carrier_locked(
+    plane: np.ndarray,
+    xac: np.ndarray,
+    abs_lp: np.ndarray,
+    fx: float,
+    fy: float,
+    cfg: V1Config,
+    ox: int = 0,
+    oy: int = 0,
+) -> tuple[np.ndarray, float]:
+    """Вычитание с ЛОКАЛЬНОЙ подстройкой фазы (вместо одной частоты на канал).
+
+    Проблема базового варианта: `zlp = НЧ(xac·e^{-iθ})` усредняет по σ, поэтому
+    при локальном дрейфе фазы (коробление бумаги, приводка, геометрия сканера)
+    усреднение частично гасит огибающую, и синтез идёт не в фазе.
+
+    Здесь фаза берётся локально, а амплитуда оценивается проекцией на локальный
+    фазор, а не усреднением комплексного произведения:
+
+        z1 = НЧ(xac·e^{-iθ}, σ)          локальная огибающая с фазой φ(x)
+        v  = z1·e^{+iθ} / |z1|           единичный фазор реального носителя
+        a  = НЧ(xac·v̄, σ)                амплитуда проекцией (дрейф фазы не гасит)
+        s  = 2·a·v                        синтез по локальному фазору
+
+    Замер 2.38 на 10 нативных кадрах: 71.7 % снятия полосы против 72.7 % у
+    базового варианта, PSNR 22.91 против 22.98 — хуже. Оставлено выключенным
+    (`phase_lock=False`) как воспроизводимая запись отрицательного результата.
+    """
+    h, w = plane.shape
+    out = plane.astype(np.float64).copy()
+    xs = (np.arange(w) + ox).astype(np.float64)
+    ys = (np.arange(h) + oy).astype(np.float64)
+    coh_mean = 0.0
+    for k in range(1, cfg.harmonics + 1):
+        ex = np.exp(-2j * np.pi * k * fx * xs)
+        ey = np.exp(-2j * np.pi * k * fy * ys)
+        ph = ey[:, None] * ex[None, :]
+        z = xac * ph
+        z1 = _lowpass(z, cfg.sigma)
+        mag = np.abs(z1)
+        coh = 2.0 * mag / (abs_lp + 1e-9)
+        coh_mean = max(coh_mean, float(np.mean(coh)))
+        wgt = _smoothstep(cfg.gate_lo, cfg.gate_hi, coh)
+        if not np.any(wgt > 0):
+            continue
+        # единичный фазор реального носителя (локальная фаза + глобальная)
+        v = np.where(mag > 1e-9, z1 * np.conj(ph) / np.maximum(mag, 1e-9), 0.0)
+        # амплитуда проекцией на фазор: усреднение не гасится дрейфом фазы
+        a = _lowpass((xac * np.conj(v)).real, cfg.sigma)
+        a = np.clip(a, 0.0, None)
+        synth = 2.0 * a * v.real
+        out -= wgt * synth
+    return out, coh_mean
 
 
 def _lowpass(a: np.ndarray, sigma: float) -> np.ndarray:
@@ -193,7 +251,8 @@ def apply_v1(
         ch_coh = 0.0
         for r, a in carr:
             th = math.radians(a)
-            plane, c = subtract_carrier(
+            _sub = subtract_carrier_locked if cfg.phase_lock else subtract_carrier
+            plane, c = _sub(
                 plane, xac, abs_lp, r * math.cos(th), r * math.sin(th), cfg
             )
             ch_coh = max(ch_coh, c)
@@ -205,7 +264,8 @@ def apply_v1(
             r, a, _s = best
             xac2, abs_lp2 = prepare(plane, max(r, 1e-6), cfg.sigma)
             th = math.radians(a)
-            plane, c = subtract_carrier(
+            _sub = subtract_carrier_locked if cfg.phase_lock else subtract_carrier
+            plane, c = _sub(
                 plane, xac2, abs_lp2, r * math.cos(th), r * math.sin(th), cfg
             )
             ch_coh = max(ch_coh, c)

@@ -85,6 +85,7 @@ dist/
 ml/Archiv/
 ml/export/
 ml/train/_run*/
+ml/train/_chain*/
 ml/train/_run8_launched
 ml/train/*.db
 ml/analysis/_plates/

@@ -758,7 +758,17 @@ pub fn adaptive_notch(img: &Array3<f32>, peaks_per_ch: &[Vec<(f32, f32)>], cfg: 
     for ch in 0..c {
         for y in 0..h {
             for x in 0..w {
-                out[[ch, y, x]] = acc[[ch, y, x]] / weight[[y, x]].max(1e-9);
+                // Окно Ханна равно нулю на краю патча, поэтому крайние пиксели
+                // кадра могут не набрать веса вообще. Деление на 1e-9 давало
+                // чёрную рамку (замер: Magazine (2) row0 = col0 = 0.0 против
+                // 0.78/0.48 в глубине). Там, где веса нет, оставляем исходный
+                // пиксель: notch к нему всё равно не применился.
+                let wsum = weight[[y, x]];
+                out[[ch, y, x]] = if wsum > 1e-3 {
+                    acc[[ch, y, x]] / wsum
+                } else {
+                    img[[ch, y, x]]
+                };
             }
         }
     }
