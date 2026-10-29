@@ -188,8 +188,7 @@ def make_one(spec: dict) -> dict:
             break
     gt_crop, content_luma = best
 
-    pcfg = preset(spec["preset"], seed=spec["print_seed"]).with_overrides(
-        lpi=spec["lpi"], ink_set=spec["ink_set"], paper_tint=tuple(spec["paper_tint"]),
+    pcfg = preset(spec["preset"], seed=spec["print_seed"]).with_overrides(        lpi=spec["lpi"], ink_set=spec["ink_set"], paper_tint=tuple(spec["paper_tint"]),
         print_dpi=spec["print_dpi"],
         registration_px_max=spec["registration_px_max"],
         warp_amp_px=spec["warp_amp_px"],
@@ -197,6 +196,16 @@ def make_one(spec: dict) -> dict:
     )
     pcfg = pcfg.for_scan_dpi(spec["scan_dpi"])
     scfg = ScanConfig(seed=spec["scan_seed"])
+    # Калибровка шума по 11 реальным сканам (JOURNAL 2.37, Temp/noise_calib.py):
+    # после V1 остаточный ВЧ-шум у реальных сканов ≈31 дБ, у синтетики ≈20 дБ,
+    # т.е. симулятор в 3–4 раза шумнее по σ. Переопределения — CLI, дефолты не
+    # меняются, чтобы старые датасеты воспроизводились бит-в-бит.
+    scfg = scfg.with_overrides(
+        poisson_peak_min=spec.get("poisson_min", scfg.poisson_peak_min),
+        poisson_peak_max=spec.get("poisson_max", scfg.poisson_peak_max),
+        gauss_sigma_min=spec.get("gauss_min", scfg.gauss_sigma_min),
+        gauss_sigma_max=spec.get("gauss_max", scfg.gauss_sigma_max),
+    )
 
     ghost = None
     show_alpha = 0.0
@@ -328,6 +337,10 @@ def build_plan(n: int, photos: list[str], docs: list[str], seed: int, start: int
             "warp_corr_px": args.warp_corr_px,
             "luma_min": args.luma_min,
             "luma_max": args.luma_max,
+            "poisson_min": args.poisson_min,
+            "poisson_max": args.poisson_max,
+            "gauss_min": args.gauss_min,
+            "gauss_max": args.gauss_max,
             "angle_deg": round(angle, 3),
             "seed": rng.randint(0, 2**31 - 1),
             "print_seed": rng.randint(0, 2**31 - 1),
@@ -394,6 +407,13 @@ def main() -> None:
     ap.add_argument("--warp-px", type=float, default=1.5,
                     help="амплитуда медленного дрейфа плиты, px печати")
     ap.add_argument("--warp-corr-px", type=int, default=256)
+    # Шум сканера. Дефолты = исторические (peak 40–120, gauss 0.004–0.012);
+    # калибровка по 11 реальным сканам даёт peak ~700–900 при gauss ~0.003–0.008
+    # (JOURNAL 2.37).
+    ap.add_argument("--poisson-min", type=float, default=40.0)
+    ap.add_argument("--poisson-max", type=float, default=120.0)
+    ap.add_argument("--gauss-min", type=float, default=0.004)
+    ap.add_argument("--gauss-max", type=float, default=0.012)
     ap.add_argument("--luma-min", type=float, default=0.22,
                     help="нижняя граница средней яркости кадра (вырожденный растр)")
     ap.add_argument("--luma-max", type=float, default=0.80,
