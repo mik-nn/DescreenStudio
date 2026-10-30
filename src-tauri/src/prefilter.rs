@@ -482,14 +482,19 @@ pub fn estimate_raster_multi(
     if ests.is_empty() {
         return RasterEstimate { r: 0.0, angle_deg: 0.0, confidence: 0.0 };
     }
-    ests.sort_by(|a, b| {
-        b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let best = RasterEstimate {
-        r: ests[0].r,
-        angle_deg: ests[0].angle_deg,
-        confidence: ests[0].confidence,
-    };
+    // Фундаментал, а не гармоника. У растровой розетки пики идут семейством
+    // r, r√2, 2r, и в отдельных окнах гармоника может оказаться сильнее
+    // фундаментала (2.43: на Offset2 сетка окон схватила 0.1807 = 0.1284·√2,
+    // V1 по гармонике дал coh 0.10 и не сработал, тогда как по фундаменталу
+    // снимал 71.7 % полосы). Среди замеров, чья уверенность не меньше половины
+    // лучшей, берём НАИМЕНЬШИЙ радиус: гармоника не может быть фундаменталом.
+    let max_conf = ests[0].confidence;
+    let fund = ests
+        .iter()
+        .filter(|e| e.confidence >= 0.5 * max_conf && e.r >= 0.05)
+        .min_by(|a, b| a.r.partial_cmp(&b.r).unwrap_or(std::cmp::Ordering::Equal))
+        .unwrap_or(&ests[0]);
+    let (ref_r, ref_ang) = (fund.r, fund.angle_deg);
     let ang_diff = |a: f32, b: f32| {
         let mut d = (a - b).abs() % 90.0;
         if d > 45.0 {
@@ -498,26 +503,29 @@ pub fn estimate_raster_multi(
         d
     };
     let mut sup = 0usize;
-    let mut wsum = best.confidence.max(1e-6);
-    let mut rsum = best.r * wsum;
-    for e in ests.iter().skip(1) {
-        if (e.r - best.r).abs() <= 0.02
-            && ang_diff(e.angle_deg, best.angle_deg) <= 8.0
-            && e.confidence > 0.25 * best.confidence
-        {
-            sup += 1;
+    let mut wsum = 0.0f32;
+    let mut rsum = 0.0f32;
+    let mut best_conf = 0.0f32;
+    for e in ests.iter() {
+        if (e.r - ref_r).abs() <= 0.02 && ang_diff(e.angle_deg, ref_ang) <= 8.0 {
             let wt = e.confidence.max(1e-6);
             wsum += wt;
             rsum += e.r * wt;
+            sup += 1;
+            if e.confidence > best_conf {
+                best_conf = e.confidence;
+            }
         }
     }
-    let r = rsum / wsum;
-    let confidence = if sup == 0 {
-        best.confidence * 0.45
+    let r = if wsum > 0.0 { rsum / wsum } else { ref_r };
+    // Одиночное окно — слабое свидетельство: растр один на страницу, поэтому
+    // подтверждение соседями обязательно.
+    let confidence = if sup <= 1 {
+        best_conf * 0.45
     } else {
-        (best.confidence * (1.0 + 0.2 * sup as f32)).min(1.0)
+        (best_conf * (1.0 + 0.2 * (sup - 1) as f32)).min(1.0)
     };
-    RasterEstimate { r, angle_deg: best.angle_deg, confidence }
+    RasterEstimate { r, angle_deg: ref_ang, confidence }
 }
 
 // ---------------------------------------------------------------------------
@@ -1661,6 +1669,35 @@ mod tests {
         assert!((multi.r - one.r).abs() < 0.01, "r {} vs {}", multi.r, one.r);
         assert!(multi.confidence >= one.confidence * 0.99);
         assert!(multi.confidence <= 1.0);
+    }
+
+    #[test]
+    fn estimate_raster_multi_prefers_fundamental_over_harmonic() {
+        // 2.43: в одном окне гармоника (r√2) сильнее фундаментала — сетка
+        // обязана вернуть фундаментал, иначе V1 демодулирует не ту частоту.
+        let s = 256usize;
+        let n = 2048usize;
+        let g = Array2::from_shape_fn((n, n), |(y, x)| {
+            let xf = (x % s) as f32;
+            let fund = (2.0 * PI * 0.15 * xf).cos();
+            let harm = (2.0 * PI * 0.15 * 1.41421356 * xf).cos();
+            let in_top_left = y < s && x < s;
+            let in_top_right = y < s && x >= n - s;
+            if in_top_left {
+                0.5 + 0.10 * fund + 0.02 * harm
+            } else if in_top_right {
+                0.5 + 0.02 * fund + 0.12 * harm
+            } else {
+                0.5
+            }
+        });
+        let cfg = PrefilterCfg::default();
+        let est = estimate_raster_multi(&g, &cfg, s, 3);
+        assert!(
+            (est.r - 0.15).abs() < 0.012,
+            "ожидался фундаментал 0.15, получено {}",
+            est.r
+        );
     }
 
     #[test]

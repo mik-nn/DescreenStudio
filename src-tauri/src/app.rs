@@ -569,11 +569,13 @@ pub fn descreen_file(
         .unwrap_or(crate::unsharp::SIGMA);
     // 2.43: порог маски структуры. 0 — линейный unsharp (историческое
     // поведение), >0 — усиление пропорционально локальному контрасту, чтобы не
-    // раздувать зерно и остаток решётки на плашках.
+    // раздувать зерно и остаток решётки на плашках. По умолчанию ВКЛЮЧЕНА:
+    // на Pack flat_hf 0.0651 -> 0.0561, на Calendar1 0.0163 -> 0.0140 при
+    // резкости без потерь (0.1232/0.0344 против 0.1168/0.0338). `0` отключает.
     let us_mask = std::env::var("DESCREEN_US_MASK")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.0);
+        .unwrap_or(0.02);
     let (mut toned, mut us_amount, mut us_sharp) = if no_unsharp {
         (toned, 0.0f32, 0.0f32)
     } else {
