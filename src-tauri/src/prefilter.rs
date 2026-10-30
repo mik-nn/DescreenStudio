@@ -482,19 +482,6 @@ pub fn estimate_raster_multi(
     if ests.is_empty() {
         return RasterEstimate { r: 0.0, angle_deg: 0.0, confidence: 0.0 };
     }
-    // Фундаментал, а не гармоника. У растровой розетки пики идут семейством
-    // r, r√2, 2r, и в отдельных окнах гармоника может оказаться сильнее
-    // фундаментала (2.43: на Offset2 сетка окон схватила 0.1807 = 0.1284·√2,
-    // V1 по гармонике дал coh 0.10 и не сработал, тогда как по фундаменталу
-    // снимал 71.7 % полосы). Среди замеров, чья уверенность не меньше половины
-    // лучшей, берём НАИМЕНЬШИЙ радиус: гармоника не может быть фундаменталом.
-    let max_conf = ests[0].confidence;
-    let fund = ests
-        .iter()
-        .filter(|e| e.confidence >= 0.5 * max_conf && e.r >= 0.05)
-        .min_by(|a, b| a.r.partial_cmp(&b.r).unwrap_or(std::cmp::Ordering::Equal))
-        .unwrap_or(&ests[0]);
-    let (ref_r, ref_ang) = (fund.r, fund.angle_deg);
     let ang_diff = |a: f32, b: f32| {
         let mut d = (a - b).abs() % 90.0;
         if d > 45.0 {
@@ -502,16 +489,64 @@ pub fn estimate_raster_multi(
         }
         d
     };
-    let mut sup = 0usize;
-    let mut wsum = 0.0f32;
+    // Кластеризация замеров вместо выбора одного «лучшего».
+    //
+    // Растр физически один на страницу, поэтому совпавшие радиус (±0.02 c/px) и
+    // угол (±8° по модулю 90° — квадратная симметрия розетки) — одно и то же
+    // свидетельство, и сила свидетельства = сумма уверенностей окон, а не
+    // максимум. Максимум ошибается в обе стороны: на Offset2 он выбрал
+    // гармонику 0.1807 = 0.1284·√2 (2.43), а правило «минимальный радиус» на
+    // Magazine (2) выбрало ложный НЧ-пик 0.0735 (2026-10-30, 2.45).
+    let cluster_of = |seed: &RasterEstimate| -> (usize, f32) {
+        let mut n = 0usize;
+        let mut wsum = 0.0f32;
+        for e in ests.iter() {
+            if (e.r - seed.r).abs() <= 0.02 && ang_diff(e.angle_deg, seed.angle_deg) <= 8.0 {
+                n += 1;
+                wsum += e.confidence.max(1e-6);
+            }
+        }
+        (n, wsum)
+    };
+    let mut best_seed = &ests[0];
+    let mut best_cl = cluster_of(best_seed);
+    for e in ests.iter().skip(1) {
+        let cl = cluster_of(e);
+        // Сначала суммарная уверенность (сколько окон согласно), при равенстве —
+        // меньший радиус: гармоника фундаменталом быть не может.
+        let better = cl.1 > best_cl.1 * 1.001
+            || ((cl.1 - best_cl.1).abs() <= best_cl.1 * 0.001 && e.r < best_seed.r);
+        if better {
+            best_seed = e;
+            best_cl = cl;
+        }
+    }
+    // Гармоника сильнее фундаментала в отдельном окне: если меньший радиус
+    // подтверждён хотя бы двумя окнами и кратен лучшему (r√2 или 2r), берём его.
+    // Требование подтверждения — именно то, чего не хватило ложному 0.0735 на
+    // Magazine (2): его видело одно окно из девяти.
+    let mut ref_seed = best_seed;
+    let mut ref_cl = best_cl;
+    for e in ests.iter() {
+        if e.r >= best_seed.r * 0.9 {
+            continue;
+        }
+        let (n, wsum) = cluster_of(e);
+        let ratio = best_seed.r / e.r;
+        let harmonic = (1.30..=1.50).contains(&ratio) || (1.85..=2.15).contains(&ratio);
+        if n >= 2 && wsum >= 0.5 * best_cl.1 && harmonic && e.r < ref_seed.r {
+            ref_seed = e;
+            ref_cl = (n, wsum);
+        }
+    }
+    let (ref_r, ref_ang) = (ref_seed.r, ref_seed.angle_deg);
+    let (sup, wsum) = ref_cl;
     let mut rsum = 0.0f32;
     let mut best_conf = 0.0f32;
     for e in ests.iter() {
         if (e.r - ref_r).abs() <= 0.02 && ang_diff(e.angle_deg, ref_ang) <= 8.0 {
             let wt = e.confidence.max(1e-6);
-            wsum += wt;
             rsum += e.r * wt;
-            sup += 1;
             if e.confidence > best_conf {
                 best_conf = e.confidence;
             }
@@ -741,6 +776,19 @@ fn apply_mask_rect(plane: &mut [f32], h: usize, w: usize, mask: &[f32]) {
 /// оставлял 4.13 % модуляции (неотличимо от «пропущено»), кольцо 0.30±0.02 —
 /// 1.55 % при потере 5 % резкости.
 pub fn ring_notch(img: &Array3<f32>, r: f32, bw: f32, order: i32) -> Array3<f32> {
+    ring_notch_radii(img, &[r], bw, order)
+}
+
+/// Кольцевой notch сразу по семейству радиусов (2.46).
+///
+/// Зачем: видимая решётка — не только фундаментал. На `Pack` сильнейшие пики в
+/// ГОТОВОМ кадре стоят на 0.2048 = 0.1451·√2 (диагонали, ±30°/−120°), а кольцо
+/// резало только 0.1451 — точки оставались на месте, хотя «остаток в полосе
+/// несущей» падал на 75 %. Маска считается один раз (объединение колец
+/// произведением пропусканий), поэтому цена та же, что у одного кольца.
+pub fn ring_notch_radii(
+    img: &Array3<f32>, radii: &[f32], bw: f32, order: i32,
+) -> Array3<f32> {
     let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
     let (hc, wc) = (h as f32 / 2.0, w as f32 / 2.0);
     let mut mask = vec![1.0f32; h * w];
@@ -749,9 +797,13 @@ pub fn ring_notch(img: &Array3<f32>, r: f32, bw: f32, order: i32) -> Array3<f32>
         for x in 0..w {
             let fx = (x as f32 - wc) / w as f32;
             let d = (fx * fx + fy * fy).sqrt();
-            let t = (d - r).abs() / bw.max(1e-4);
-            let gain = 1.0 / (1.0 + t.powi(2 * order));
-            mask[y * w + x] = 1.0 - gain;
+            let mut keep = 1.0f32;
+            for &r in radii {
+                let t = (d - r).abs() / bw.max(1e-4);
+                let gain = 1.0 / (1.0 + t.powi(2 * order));
+                keep *= 1.0 - gain;
+            }
+            mask[y * w + x] = keep;
         }
     }
     let mut out = Array3::<f32>::zeros((c, h, w));
@@ -1673,7 +1725,7 @@ mod tests {
 
     #[test]
     fn estimate_raster_multi_prefers_fundamental_over_harmonic() {
-        // 2.43: в одном окне гармоника (r√2) сильнее фундаментала — сетка
+        // 2.43: гармоника (r√2) сильнее фундаментала в отдельном окне — сетка
         // обязана вернуть фундаментал, иначе V1 демодулирует не ту частоту.
         let s = 256usize;
         let n = 2048usize;
@@ -1681,12 +1733,40 @@ mod tests {
             let xf = (x % s) as f32;
             let fund = (2.0 * PI * 0.15 * xf).cos();
             let harm = (2.0 * PI * 0.15 * 1.41421356 * xf).cos();
-            let in_top_left = y < s && x < s;
+            // фундаментал — по всему кадру, гармоника — только в одном окне
             let in_top_right = y < s && x >= n - s;
-            if in_top_left {
-                0.5 + 0.10 * fund + 0.02 * harm
-            } else if in_top_right {
-                0.5 + 0.02 * fund + 0.12 * harm
+            if in_top_right {
+                0.5 + 0.04 * fund + 0.12 * harm
+            } else {
+                0.5 + 0.06 * fund
+            }
+        });
+        let cfg = PrefilterCfg::default();
+        let est = estimate_raster_multi(&g, &cfg, s, 3);
+        assert!(
+            (est.r - 0.15).abs() < 0.012,
+            "ожидался фундаментал 0.15, получено {}",
+            est.r
+        );
+    }
+
+    #[test]
+    fn estimate_raster_multi_ignores_lone_low_freq_peak() {
+        // 2.45: на Magazine (2) правило «минимальный радиус» выбрало ложный
+        // НЧ-пик 0.0735 (период 13.6 px), который видела ОДНА зона из девяти,
+        // и V1 не сработал (coh 0.09). Подтверждённая несущая 0.15 в двух
+        // окнах должна выигрывать у сильного, но одинокого НЧ-пика.
+        let s = 256usize;
+        let n = 2048usize;
+        let g = Array2::from_shape_fn((n, n), |(y, x)| {
+            let xf = (x % s) as f32;
+            let carrier = 0.5 + 0.05 * (2.0 * PI * 0.15 * xf).cos();
+            let low = 0.5 + 0.10 * (2.0 * PI * 0.0735 * xf).cos();
+            let in_left = x < s;
+            if in_left && (y < s || (y >= n - s && y < n)) {
+                carrier
+            } else if y < s && x >= n - s {
+                low
             } else {
                 0.5
             }
@@ -1695,7 +1775,7 @@ mod tests {
         let est = estimate_raster_multi(&g, &cfg, s, 3);
         assert!(
             (est.r - 0.15).abs() < 0.012,
-            "ожидался фундаментал 0.15, получено {}",
+            "ожидалась подтверждённая несущая 0.15, получено {}",
             est.r
         );
     }

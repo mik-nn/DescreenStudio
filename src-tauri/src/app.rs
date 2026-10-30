@@ -206,6 +206,31 @@ pub(crate) fn spectrum_data_url(path: &Path) -> Result<PreviewOut, String> {
     })
 }
 
+/// Радиусы колец для notch по семейству несущей (2.46).
+///
+/// Растровая розетка даёт пики на r, r√2, 2r, и ВИДИМАЯ решётка часто стоит
+/// именно на гармонике: на `Pack` сильнейшие пики готового кадра — 0.2048 =
+/// 0.1451·√2 (диагонали ±30°/−120°), поэтому кольцо по одному фундаменталу
+/// (0.145) точки не убирало, хотя узкополосный «остаток в полосе несущей»
+/// падал на 75 %. Набор задаётся `DESCREEN_RING_MULT` (по умолчанию "1,1.414";
+/// "1" — историческое поведение, "1,1.414,2" — с второй гармоникой).
+fn ring_radii(r: f32) -> Vec<f32> {
+    let spec = std::env::var("DESCREEN_RING_MULT").unwrap_or_else(|_| "1,1.414".into());
+    let mut v: Vec<f32> = Vec::new();
+    for tok in spec.split(',') {
+        if let Ok(m) = tok.trim().parse::<f32>() {
+            let rad = r * m;
+            if m > 0.9 && rad > 0.02 && rad < 0.499 {
+                v.push(rad);
+            }
+        }
+    }
+    if v.is_empty() {
+        v.push(r);
+    }
+    v
+}
+
 /// Core descreen pipeline (Tauri-free, unit-testable):
 /// load -> A0 raster measurement -> edge-adaptive notch -> LF-band subtraction
 /// -> tiled inference -> AI-blend mix (anchor: prefiltered) -> paper-background
@@ -394,11 +419,17 @@ pub fn descreen_file(
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.02);
         let stage = std::env::var("DESCREEN_RING_STAGE").unwrap_or_else(|_| "both".into());
+        let radii = ring_radii(ring_r);
         if stage != "post" {
-            pre = crate::prefilter::ring_notch(&pre, ring_r, bw, 4);
+            pre = crate::prefilter::ring_notch_radii(&pre, &radii, bw, 4);
         }
         if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
-            eprintln!("[stage] ring notch: r={:.4} bw={:.3} stage={}", ring_r, bw, stage);
+            eprintln!(
+                "[stage] ring notch: r={:?} bw={:.3} stage={}",
+                radii.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                bw,
+                stage
+            );
         }
     }
     let t_notch = t00.elapsed();
@@ -619,9 +650,14 @@ pub fn descreen_file(
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.02);
-        toned = crate::prefilter::ring_notch(&toned, ring_r, bw, 4);
+        let radii = ring_radii(ring_r);
+        toned = crate::prefilter::ring_notch_radii(&toned, &radii, bw, 4);
         if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
-            eprintln!("[stage] ring notch (post): r={:.4} bw={:.3}", ring_r, bw);
+            eprintln!(
+                "[stage] ring notch (post): r={:?} bw={:.3}",
+                radii.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>(),
+                bw
+            );
         }
     }
     eprintln!(
