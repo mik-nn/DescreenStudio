@@ -776,7 +776,7 @@ fn apply_mask_rect(plane: &mut [f32], h: usize, w: usize, mask: &[f32]) {
 /// оставлял 4.13 % модуляции (неотличимо от «пропущено»), кольцо 0.30±0.02 —
 /// 1.55 % при потере 5 % резкости.
 pub fn ring_notch(img: &Array3<f32>, r: f32, bw: f32, order: i32) -> Array3<f32> {
-    ring_notch_radii(img, &[r], bw, order)
+    ring_notch_radii(img, &[(r, bw)], order)
 }
 
 /// Кольцевой notch сразу по семейству радиусов (2.46).
@@ -786,8 +786,13 @@ pub fn ring_notch(img: &Array3<f32>, r: f32, bw: f32, order: i32) -> Array3<f32>
 /// резало только 0.1451 — точки оставались на месте, хотя «остаток в полосе
 /// несущей» падал на 75 %. Маска считается один раз (объединение колец
 /// произведением пропусканий), поэтому цена та же, что у одного кольца.
+///
+/// Ширина задаётся для каждого кольца отдельно (`(radius, bw)`): у гармоники
+/// пик уже, чем у фундаментала (AM-боковые полосы шире у более сильной
+/// составляющей), и кольцо 0.02 на 0.205 срезает слишком много контента —
+/// резкость 51 % → 46 % скана при том же остатке.
 pub fn ring_notch_radii(
-    img: &Array3<f32>, radii: &[f32], bw: f32, order: i32,
+    img: &Array3<f32>, rings: &[(f32, f32)], order: i32,
 ) -> Array3<f32> {
     let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
     let (hc, wc) = (h as f32 / 2.0, w as f32 / 2.0);
@@ -798,7 +803,7 @@ pub fn ring_notch_radii(
             let fx = (x as f32 - wc) / w as f32;
             let d = (fx * fx + fy * fy).sqrt();
             let mut keep = 1.0f32;
-            for &r in radii {
+            for &(r, bw) in rings {
                 let t = (d - r).abs() / bw.max(1e-4);
                 let gain = 1.0 / (1.0 + t.powi(2 * order));
                 keep *= 1.0 - gain;
