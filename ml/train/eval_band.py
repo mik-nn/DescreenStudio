@@ -112,9 +112,15 @@ def main() -> None:
     in_band = [band_amp(scans[i:i + 1], rr[i], args.bw) for i in range(n)]
     hf_gt = float(np.mean([flat_hf(gts[i:i + 1]) for i in range(n)]))
     hf_scan = float(np.mean([flat_hf(scans[i:i + 1]) for i in range(n)]))
-    print(f"{'вариант':32s} {'PSNR':>7s} {'band/in':>8s} {'flat_hf':>9s}")
-    print(f"{'gt (решётки нет)':32s} {'-':>7s} {'-':>8s} {hf_gt:9.5f}")
-    print(f"{'scan (вход)':32s} {'-':>7s} {'1.0000':>8s} {hf_scan:9.5f}")
+    # Пол по несущей — сам эталон: в кольце |f-r| < bw у настоящей картинки
+    # тоже есть энергия (текстура, края). Поэтому отношение pred/scan нельзя
+    # читать как «сколько растра осталось»: 0.37 — это контент, не растр.
+    # Ниже печатается доля СНЯТОГО ИЗБЫТКА: (1-p)/(1-g), где g = gt/scan.
+    gt_band = float(np.mean([band_amp(gts[i:i + 1], rr[i], args.bw) for i in range(n)]))
+    g_rel = gt_band / float(np.mean(in_band))
+    print(f"{'вариант':32s} {'PSNR':>7s} {'band/in':>8s} {'excess':>7s} {'flat_hf':>9s}")
+    print(f"{'gt (решётки нет)':32s} {'-':>7s} {g_rel:8.4f} {'-':>7s} {hf_gt:9.5f}")
+    print(f"{'scan (вход)':32s} {'-':>7s} {'1.0000':>8s} {'-':>7s} {hf_scan:9.5f}")
 
     cond = torch.zeros(1, COND_DIM, device="cuda")
     for cp in args.ckpts:
@@ -136,7 +142,9 @@ def main() -> None:
                     bnd.append(band_amp(pr, rr[i], args.bw) / max(in_band[i], 1e-12))
                     hf.append(flat_hf(pr))
             tag = f"{Path(cp).parent.name}/{vname}"
-            print(f"{tag:32s} {ps/n:7.2f} {np.mean(bnd):8.4f} {np.mean(hf):9.5f}")
+            rel = float(np.mean(bnd))
+            exc = (1.0 - rel) / max(1.0 - g_rel, 1e-6)
+            print(f"{tag:32s} {ps/n:7.2f} {rel:8.4f} {100*exc:6.0f}% {np.mean(hf):9.5f}")
 
 
 if __name__ == "__main__":
