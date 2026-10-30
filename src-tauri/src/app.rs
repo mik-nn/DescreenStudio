@@ -235,7 +235,10 @@ pub fn descreen_file(
     // Найквист–Котельников режим (2.27→продукт): приводим период растра к
     // 2 px (r=0.5), вся цепочка работает в этом разрешении, результат
     // возвращается в исходный размер (Lanczos3).
-    let nyq = if nyquist {
+    // `DESCREEN_NATIVE=1` — нативный режим (2.40): рабочий кадр = скан, ни
+    // даунсэмпла, ни апскейла, снятие растра — целиком на сети.
+    let native_mode = std::env::var("DESCREEN_NATIVE").map(|v| v != "0").unwrap_or(false);
+    let nyq = if nyquist && !native_mode {
         crate::nyquist::plan_with(&img, &pcfg, &crate::nyquist::NyqCfg::from_env())
     } else {
         crate::nyquist::NyquistPlan {
@@ -248,7 +251,17 @@ pub fn descreen_file(
             iters: 0,
         }
     };
-    let nyq_active = nyquist && nyq.scale < crate::nyquist::SCALE_SKIP;
+    let nyq_active = nyquist && !native_mode && nyq.scale < crate::nyquist::SCALE_SKIP;
+    // 2.42: радиус несущей для кольцевого notch. В Найквист-режиме он задан
+    // планом (r_out), в нативном — оценкой A0 на исходном кадре. Считается до
+    // V1: после вычитания растра оценка слабеет.
+    let ring_r = if nyq_active {
+        nyq.r_out
+    } else if nyquist || native_mode {
+        crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024).r
+    } else {
+        0.0
+    };
     // V1 (2.32): параметрическое вычитание растра «оценить -> синтезировать ->
     // вычесть». Работает в НАТИВНОМ разрешении и поэтому идёт ДО Найквист-
     // даунсэмпла: на chain-кадре (период 2 px) демодуляция вырождена — боковые
@@ -366,17 +379,17 @@ pub fn descreen_file(
     // растра в рабочем кадре задана планом (r_out), и остаток V1 + его AM-
     // боковые полосы обязаны уйти, иначе они ложатся в видимую полосу и
     // усиливаются unsharp-ом (Pack: 4.28 % модуляции против 3.12 % в скане).
-    if std::env::var("DESCREEN_RING").map(|v| v != "0").unwrap_or(false) && nyq_active {
+    if std::env::var("DESCREEN_RING").map(|v| v != "0").unwrap_or(false) && ring_r > 0.0 {
         let bw = std::env::var("DESCREEN_RING_BW")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.02);
         let stage = std::env::var("DESCREEN_RING_STAGE").unwrap_or_else(|_| "both".into());
         if stage != "post" {
-            pre = crate::prefilter::ring_notch(&pre, nyq.r_out, bw, 4);
+            pre = crate::prefilter::ring_notch(&pre, ring_r, bw, 4);
         }
         if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
-            eprintln!("[stage] ring notch: r={:.4} bw={:.3} stage={}", nyq.r_out, bw, stage);
+            eprintln!("[stage] ring notch: r={:.4} bw={:.3} stage={}", ring_r, bw, stage);
         }
     }
     let t_notch = t00.elapsed();
@@ -525,17 +538,38 @@ pub fn descreen_file(
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(crate::unsharp::AMOUNT_MAX);
+    // Опорный кадр для петли резкости. `scan` — историческое поведение
+    // (сравнение со сканом), `pre` — с пре-стейджем: в нативном режиме скан
+    // содержит растр, и петля «догоняет» его ВЧ, усиливая остаток (2.40).
+    let us_ref = if std::env::var("DESCREEN_US_REF").map(|v| v == "pre").unwrap_or(false) {
+        &pre
+    } else {
+        &img
+    };
+    // 2.42: цель петли. После кольцевого notch резкость падает на 15–20 %,
+    // поэтому при включённой зачистке цель поднимается (DESCREEN_US_TARGET).
+    let us_target = std::env::var("DESCREEN_US_TARGET")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(crate::unsharp::SHARP_TARGET);
+    // 2.42: σ unsharp. Меньшая σ меньше усиливает решётку (σ=1 даёт на несущей
+    // 0.145 c/px gain 1+0.34·amount, σ=0.6 — 1+0.14·amount).
+    let us_sigma = std::env::var("DESCREEN_US_SIGMA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(crate::unsharp::SIGMA);
     let (mut toned, mut us_amount, mut us_sharp) = if no_unsharp {
         (toned, 0.0f32, 0.0f32)
     } else {
-        crate::unsharp::adaptive_unsharp_cap(&toned, &img, us_max)
+        crate::unsharp::adaptive_unsharp_cap_s(&toned, us_ref, us_max, us_target, us_sigma)
     };
     let mut b_used = b;
     if !no_unsharp && us_sharp < 0.90 && b > 0.4 {
         let (orig_sharp, orig_amt) = (us_sharp, us_amount);
         for bf in [0.4f32, 0.15] {
             let t2 = finish(&out, k_final, bf);
-            let (o2, a2, s2) = crate::unsharp::adaptive_unsharp_cap(&t2, &img, us_max);
+            let (o2, a2, s2) =
+                crate::unsharp::adaptive_unsharp_cap_s(&t2, &img, us_max, us_target, us_sigma);
             if s2 > us_sharp {
                 toned = o2;
                 us_amount = a2;
@@ -556,7 +590,7 @@ pub fn descreen_file(
     // 2.40: финальная зачистка несущей. unsharp (σ=1) усиливает остаток на
     // r_out в ≈1.4× (Pack: пре 1.55 % -> после unsharp 1.94 %), поэтому кольцо
     // вырезается ещё раз уже в готовом кадре.
-    if nyq_active
+    if ring_r > 0.0
         && std::env::var("DESCREEN_RING").map(|v| v != "0").unwrap_or(false)
         && std::env::var("DESCREEN_RING_STAGE").unwrap_or_else(|_| "both".into()) != "pre"
     {
@@ -564,9 +598,9 @@ pub fn descreen_file(
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .unwrap_or(0.02);
-        toned = crate::prefilter::ring_notch(&toned, nyq.r_out, bw, 4);
+        toned = crate::prefilter::ring_notch(&toned, ring_r, bw, 4);
         if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
-            eprintln!("[stage] ring notch (post): r={:.4} bw={:.3}", nyq.r_out, bw);
+            eprintln!("[stage] ring notch (post): r={:.4} bw={:.3}", ring_r, bw);
         }
     }
     eprintln!(

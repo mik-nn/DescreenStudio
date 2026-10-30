@@ -1,4 +1,5 @@
 # Fine-tune at NATIVE resolution (scale = 1.0, screen period 4-10 px).
+# ASCII only: PowerShell 5.1 reads UTF-8 without BOM as ANSI (repo rule).
 #
 # Why (JOURNAL 2.40): at any working resolution above the screen the chain keeps
 # a visible copy of the halftone lattice, and every downsample costs sharpness.
@@ -7,14 +8,14 @@
 #   r_out=0.30      sharpness 0.0454  residual 2.55 %   (2.07x upscale)
 #   native (1.0)    sharpness 0.0586  residual 2.51 %   (+29 % over 0.30, +56 % over old)
 # So the working frame must be the scan itself: no downsample, no upscale, and
-# the lattice removal becomes the network's job (V1 already takes 70-93 % of the
+# the lattice removal becomes the network's job (V1 already takes ~83 % of the
 # carrier band at native).
 #
 # Input: Data/chain_native, built by
 #   make_chain.py --native-scale --train 1500 --val 150
 # where r_out = r of every frame, so scale = 1.0 and the chain frame IS the scan.
 #
-# Start: ml/train/_chain_v1/best.pt (chain-adapted, same arch); the domain is
+# Start: ml/train/_chain_v1/best.pt (chain-adapted, same arch). The domain is
 #   harder, so lr is slightly higher than the 0.30 pass.
 #
 # Run: powershell -File ml/train/finetune_chain_native.ps1

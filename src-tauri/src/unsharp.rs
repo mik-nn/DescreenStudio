@@ -153,38 +153,68 @@ pub fn adaptive_unsharp_cap(
     src: &Array3<f32>,
     amount_max: f32,
 ) -> (Array3<f32>, f32, f32) {
+    adaptive_unsharp_cap_t(img, src, amount_max, SHARP_TARGET)
+}
+
+/// То же с внешней целью по резкости. Нужна, когда за `unsharp` идёт
+/// кольцевой notch: он снимает 15–20 % резкости (2.42), и петля, нацеленная
+/// ровно на 1.0 от пре-стейджа, после зачистки оказывается ниже цели.
+pub fn adaptive_unsharp_cap_t(
+    img: &Array3<f32>,
+    src: &Array3<f32>,
+    amount_max: f32,
+    target: f32,
+) -> (Array3<f32>, f32, f32) {
+    adaptive_unsharp_cap_s(img, src, amount_max, target, SIGMA)
+}
+
+/// То же с явной σ. Меньшая σ переносит усиление к более высоким частотам:
+/// при σ=1 на несущей 0.145 c/px (период 6.9 px) gain = 1+0.34·amount, при
+/// σ=0.6 — 1+0.14·amount, тогда как на контурах (0.25 c/px) отношение мягче.
+/// Это дешевле кольцевого notch и не требует полноразмерного FFT (2.42).
+pub fn adaptive_unsharp_cap_s(
+    img: &Array3<f32>,
+    src: &Array3<f32>,
+    amount_max: f32,
+    target: f32,
+    sigma: f32,
+) -> (Array3<f32>, f32, f32) {
     let amount_max = amount_max.clamp(0.0, AMOUNT_MAX);
+    let target = target.clamp(0.5, 2.0);
+    let sigma = sigma.clamp(0.3, 3.0);
     let src_l = crate::prefilter::luma_of(src);
     let out_l = |a: &Array3<f32>| crate::prefilter::luma_of(a);
     let r0 = sharp_ratio(&src_l, &out_l(img));
-    if r0 >= SHARP_TARGET - SHARP_TOL || amount_max <= 0.0 {
+    if r0 >= target - SHARP_TOL || amount_max <= 0.0 {
         return (img.clone(), 0.0, r0);
     }
     let mut amount = 0.5f32.min(amount_max);
     let mut best = img.clone();
-    let mut best_d = (r0 - SHARP_TARGET).abs();
+    let mut best_amount = 0.0f32;
+    let mut best_d = (r0 - target).abs();
     for _ in 0..MAX_ITERS {
-        let cand = unsharp(img, amount, SIGMA);
+        let cand = unsharp(img, amount, sigma);
         let r = sharp_ratio(&src_l, &out_l(&cand));
-        let d = (r - SHARP_TARGET).abs();
+        let d = (r - target).abs();
         if d < best_d {
             best = cand.clone();
             best_d = d;
+            best_amount = amount;
         }
         if d <= SHARP_TOL {
             return (cand, amount, r);
         }
-        if r < SHARP_TARGET {
+        if r < target {
             amount = amount_max.min(amount * AMOUNT_STEP);
         } else {
             amount /= AMOUNT_STEP;
         }
-        if amount >= amount_max && r < SHARP_TARGET {
+        if amount >= amount_max && r < target {
             break;
         }
     }
     let r = sharp_ratio(&src_l, &out_l(&best));
-    (best, amount, r)
+    (best, best_amount, r)
 }
 
 #[cfg(test)]
