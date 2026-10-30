@@ -414,8 +414,14 @@ pub fn detect_peaks_plane(
 pub fn estimate_raster(gray: &Array2<f32>, cfg: &PrefilterCfg, roi: usize) -> RasterEstimate {
     let (h, w) = (gray.shape()[0], gray.shape()[1]);
     let s = roi.min(h).min(w);
-    let y0 = h / 2 - s / 2;
-    let x0 = w / 2 - s / 2;
+    estimate_raster_at(gray, cfg, h / 2 - s / 2, w / 2 - s / 2, s)
+}
+
+/// Один ROI заданного положения (2.43: вынесено из `estimate_raster`, чтобы
+/// замер можно было делать в нескольких окнах кадра).
+fn estimate_raster_at(
+    gray: &Array2<f32>, cfg: &PrefilterCfg, y0: usize, x0: usize, s: usize,
+) -> RasterEstimate {
     let mut v = vec![0.0f32; s * s];
     for y in 0..s {
         for x in 0..s {
@@ -439,6 +445,79 @@ pub fn estimate_raster(gray: &Array2<f32>, cfg: &PrefilterCfg, roi: usize) -> Ra
             confidence: ((f.strength - thr) / (thr * 5.0 + 1e-12)).clamp(0.0, 1.0),
         },
     }
+}
+
+/// Замер растра по сетке `side × side` окон вместо одного центрального.
+///
+/// Причина (2.42): на `Magazine (2)` центр 69 Мпикс кадра пришёлся на плашку
+/// без растра — A0 вернул 0.244 при confidence 0.03, V1 не сработал, кольцевой
+/// notch вырезал не ту полосу, а unsharp усилил неснятую решётку. Один ROI не
+/// может отличить «растра нет» от «в этом окне его не видно».
+///
+/// Выбирается самый уверенный замер, подтверждённый соседними окнами: растр
+/// физически один на страницу, поэтому совпадение радиуса (±0.02 c/px) и угла
+/// (±8° по модулю 90° — у растровых розеток квадратная симметрия) считается
+/// подтверждением. Одиночный замер получает пониженную уверенность, чтобы
+/// гейты (`coh`) не принимали шум за несущую.
+pub fn estimate_raster_multi(
+    gray: &Array2<f32>, cfg: &PrefilterCfg, roi: usize, side: usize,
+) -> RasterEstimate {
+    let (h, w) = (gray.shape()[0], gray.shape()[1]);
+    let s = roi.min(h).min(w);
+    let side = side.max(1);
+    if side == 1 || s < 128 {
+        return estimate_raster(gray, cfg, roi);
+    }
+    let mut ests: Vec<RasterEstimate> = Vec::with_capacity(side * side);
+    for iy in 0..side {
+        for ix in 0..side {
+            let y0 = (h - s) * iy / (side - 1);
+            let x0 = (w - s) * ix / (side - 1);
+            let e = estimate_raster_at(gray, cfg, y0, x0, s);
+            if e.r > 0.02 && e.r < 0.49 {
+                ests.push(e);
+            }
+        }
+    }
+    if ests.is_empty() {
+        return RasterEstimate { r: 0.0, angle_deg: 0.0, confidence: 0.0 };
+    }
+    ests.sort_by(|a, b| {
+        b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let best = RasterEstimate {
+        r: ests[0].r,
+        angle_deg: ests[0].angle_deg,
+        confidence: ests[0].confidence,
+    };
+    let ang_diff = |a: f32, b: f32| {
+        let mut d = (a - b).abs() % 90.0;
+        if d > 45.0 {
+            d = 90.0 - d;
+        }
+        d
+    };
+    let mut sup = 0usize;
+    let mut wsum = best.confidence.max(1e-6);
+    let mut rsum = best.r * wsum;
+    for e in ests.iter().skip(1) {
+        if (e.r - best.r).abs() <= 0.02
+            && ang_diff(e.angle_deg, best.angle_deg) <= 8.0
+            && e.confidence > 0.25 * best.confidence
+        {
+            sup += 1;
+            let wt = e.confidence.max(1e-6);
+            wsum += wt;
+            rsum += e.r * wt;
+        }
+    }
+    let r = rsum / wsum;
+    let confidence = if sup == 0 {
+        best.confidence * 0.45
+    } else {
+        (best.confidence * (1.0 + 0.2 * sup as f32)).min(1.0)
+    };
+    RasterEstimate { r, angle_deg: best.angle_deg, confidence }
 }
 
 // ---------------------------------------------------------------------------
@@ -1541,6 +1620,47 @@ mod tests {
         let ang = est.angle_deg.rem_euclid(180.0);
         assert!(ang < 10.0 || ang > 170.0, "ang={}", est.angle_deg);
         assert!(est.confidence > 0.5, "conf={}", est.confidence);
+    }
+
+    #[test]
+    fn estimate_raster_multi_ignores_blank_centre() {
+        // 2.43: растр есть только в углу, центр — плашка. Центральный ROI
+        // несущую не видит, сетка окон обязана найти.
+        let n = 2048usize;
+        let s = 256usize;
+        let g = Array2::from_shape_fn((n, n), |(y, x)| {
+            if y < s && x < s {
+                0.5 + 0.1 * (2.0 * PI * 0.15 * x as f32).cos()
+            } else {
+                0.5
+            }
+        });
+        let cfg = PrefilterCfg::default();
+        let center = estimate_raster(&g, &cfg, s);
+        let multi = estimate_raster_multi(&g, &cfg, s, 3);
+        assert!(
+            (center.r - 0.15).abs() > 0.01,
+            "центральный ROI не должен видеть растр, r={}",
+            center.r
+        );
+        assert!((multi.r - 0.15).abs() < 0.01, "multi r={}", multi.r);
+        assert!(multi.confidence > center.confidence, "conf {} vs {}", multi.confidence, center.confidence);
+    }
+
+    #[test]
+    fn estimate_raster_multi_discounts_single_roi() {
+        // Один и тот же растр во всех окнах: подтверждение соседями даёт
+        // уверенность не ниже, чем у одиночного замера, и не более 1.
+        let n = 1024usize;
+        let g = Array2::from_shape_fn((n, n), |(_, x)| {
+            0.5 + 0.1 * (2.0 * PI * 0.15 * x as f32).cos()
+        });
+        let cfg = PrefilterCfg::default();
+        let one = estimate_raster(&g, &cfg, 1024);
+        let multi = estimate_raster_multi(&g, &cfg, 1024, 3);
+        assert!((multi.r - one.r).abs() < 0.01, "r {} vs {}", multi.r, one.r);
+        assert!(multi.confidence >= one.confidence * 0.99);
+        assert!(multi.confidence <= 1.0);
     }
 
     #[test]

@@ -16,6 +16,11 @@ pub const SHARP_TOL: f32 = 0.05;
 pub const AMOUNT_MAX: f32 = 2.2;
 pub const AMOUNT_STEP: f32 = 1.4;
 pub const SIGMA: f32 = 1.0;
+/// Маска структуры (2.43): размытие для оценки контраста и нормировка.
+/// `MASK_T` — перепад яркости на 2 px, который считается «полной» структурой.
+pub const MASK_SIGMA: f32 = 2.0;
+pub const MASK_GAMMA: f32 = 1.0;
+pub const MASK_T: f32 = 0.02;
 const CENTER_ROI: usize = 1024;
 const MAX_ITERS: usize = 8;
 
@@ -116,6 +121,41 @@ fn blur_channel(ch: &Array2<f32>, sigma: f32) -> Array2<f32> {
 
 /// img + amount*(img - gauss(img)), clip [0,1].
 pub fn unsharp(img: &Array3<f32>, amount: f32, sigma: f32) -> Array3<f32> {
+    unsharp_masked(img, amount, sigma, None)
+}
+
+/// Маска структуры: ≈1 на контурах и мелкой графике, ≈0 на плашках и бумаге.
+///
+/// Зачем (2.42): линейный unsharp поднимает ВСЕ высокие частоты, включая
+/// остаток решётки и зерно, которое сеть не убрала. На `Pack` это дало
+/// «тканевую» фактуру на ровных заливках при выигрыше резкости на контурах.
+/// Маска считается по СИЛЬНО размытой яркости (sigma=2), поэтому сам растр
+/// (период 5–10 px) её не открывает — иначе усиление шло бы ровно туда, где
+/// решётка и живёт.
+pub fn structure_mask(luma: &Array2<f32>, blur_sigma: f32, t: f32, gamma: f32) -> Array2<f32> {
+    let g = blur_channel(luma, blur_sigma);
+    let (h, w) = g.dim();
+    let mut m = Array2::<f32>::zeros((h, w));
+    let inv_t = 1.0 / t.max(1e-6);
+    for y in 0..h {
+        let ym = y.saturating_sub(1);
+        let yp = (y + 1).min(h - 1);
+        for x in 0..w {
+            let xm = x.saturating_sub(1);
+            let xp = (x + 1).min(w - 1);
+            let gx = g[[y, xp]] - g[[y, xm]];
+            let gy = g[[yp, x]] - g[[ym, x]];
+            let mag = (gx * gx + gy * gy).sqrt();
+            m[[y, x]] = (mag * inv_t).clamp(0.0, 1.0).powf(gamma);
+        }
+    }
+    blur_channel(&m, blur_sigma)
+}
+
+/// unsharp с маской по пикселям (`None` = обычный unsharp).
+pub fn unsharp_masked(
+    img: &Array3<f32>, amount: f32, sigma: f32, mask: Option<&Array2<f32>>,
+) -> Array3<f32> {
     if amount <= 0.0 {
         return img.clone();
     }
@@ -126,7 +166,11 @@ pub fn unsharp(img: &Array3<f32>, amount: f32, sigma: f32) -> Array3<f32> {
         let blur = blur_channel(&ch, sigma);
         for y in 0..h {
             for x in 0..w {
-                out[[c, y, x]] = (img[[c, y, x]] + amount * (img[[c, y, x]] - blur[[y, x]]))
+                let m = match mask {
+                    Some(mk) => mk[[y, x]],
+                    None => 1.0,
+                };
+                out[[c, y, x]] = (img[[c, y, x]] + amount * m * (img[[c, y, x]] - blur[[y, x]]))
                     .clamp(0.0, 1.0);
             }
         }
@@ -179,11 +223,31 @@ pub fn adaptive_unsharp_cap_s(
     target: f32,
     sigma: f32,
 ) -> (Array3<f32>, f32, f32) {
+    adaptive_unsharp_ex(img, src, amount_max, target, sigma, 0.0)
+}
+
+/// То же с маской структуры (2.43). `mask_t` = 0 отключает маску (линейный
+/// unsharp). Иначе усиление пропорционально локальному контрасту размытой
+/// яркости: контуры получают полный `amount`, плашки — почти ноль, поэтому
+/// остаток решётки и зерно на ровных заливках не раздуваются.
+pub fn adaptive_unsharp_ex(
+    img: &Array3<f32>,
+    src: &Array3<f32>,
+    amount_max: f32,
+    target: f32,
+    sigma: f32,
+    mask_t: f32,
+) -> (Array3<f32>, f32, f32) {
     let amount_max = amount_max.clamp(0.0, AMOUNT_MAX);
     let target = target.clamp(0.5, 2.0);
     let sigma = sigma.clamp(0.3, 3.0);
     let src_l = crate::prefilter::luma_of(src);
     let out_l = |a: &Array3<f32>| crate::prefilter::luma_of(a);
+    let mask = if mask_t > 0.0 {
+        Some(structure_mask(&src_l, MASK_SIGMA, mask_t, MASK_GAMMA))
+    } else {
+        None
+    };
     let r0 = sharp_ratio(&src_l, &out_l(img));
     if r0 >= target - SHARP_TOL || amount_max <= 0.0 {
         return (img.clone(), 0.0, r0);
@@ -193,7 +257,7 @@ pub fn adaptive_unsharp_cap_s(
     let mut best_amount = 0.0f32;
     let mut best_d = (r0 - target).abs();
     for _ in 0..MAX_ITERS {
-        let cand = unsharp(img, amount, sigma);
+        let cand = unsharp_masked(img, amount, sigma, mask.as_ref());
         let r = sharp_ratio(&src_l, &out_l(&cand));
         let d = (r - target).abs();
         if d < best_d {

@@ -252,13 +252,22 @@ pub fn descreen_file(
         }
     };
     let nyq_active = nyquist && !native_mode && nyq.scale < crate::nyquist::SCALE_SKIP;
+    // 2.43: замер растра по сетке окон вместо одного центрального. На
+    // `Magazine (2)` (69 Мпикс) центр пришёлся на плашку без растра — A0 дал
+    // 0.244 при conf 0.03, V1 не сработал, кольцевой notch вырезал не ту
+    // полосу, и unsharp усилил неснятую решётку. Считается ОДИН раз: V1,
+    // радиус кольца и FiLM-cond должны видеть одну и ту же несущую.
+    let est_native = if v1_enabled || nyquist || native_mode {
+        crate::prefilter::estimate_raster_multi(&luma_of(&img), &pcfg, 1024, 3)
+    } else {
+        crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024)
+    };
     // 2.42: радиус несущей для кольцевого notch. В Найквист-режиме он задан
-    // планом (r_out), в нативном — оценкой A0 на исходном кадре. Считается до
-    // V1: после вычитания растра оценка слабеет.
+    // планом (r_out), в нативном — оценкой A0 на исходном кадре.
     let ring_r = if nyq_active {
         nyq.r_out
     } else if nyquist || native_mode {
-        crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024).r
+        est_native.r
     } else {
         0.0
     };
@@ -269,7 +278,6 @@ pub fn descreen_file(
     // так что масштаб нормализации вычитание не портит.
     let v1_cfg = crate::v1::V1Cfg::from_env();
     let v1_acted = if v1_enabled {
-        let est_native = crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024);
         let band0 = crate::prefilter::band_energy_abs(&luma_of(&img), 0.40 * est_native.r / 0.5, 0.50 * est_native.r / 0.5);
         let t1 = Instant::now();
         let rep = crate::v1::apply(&mut img, est_native.r, &v1_cfg, &pcfg, 1024);
@@ -312,7 +320,8 @@ pub fn descreen_file(
     }
     // A0-замер на входе сети (до префильтра) — cond для FiLM-run27_hyb;
     // паритет с eval_realscan.py:140-166. Для ort/run3 cond игнорируется.
-    let est = crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024);
+    // 2.43: сетка окон — один центральный ROI ошибается на крупных сканах.
+    let est = crate::prefilter::estimate_raster_multi(&luma_of(&img), &pcfg, 1024, 3);
     let cond = crate::candle_engine::build_cond_vec(est.r, est.angle_deg, est.confidence);
     eprintln!(
         "[stage] A0: r={:.4} ang={:.1} conf={:.3} cond=[{:.3},{:.3},{:.3},{:.3}] engine={}",
@@ -558,18 +567,28 @@ pub fn descreen_file(
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
         .unwrap_or(crate::unsharp::SIGMA);
+    // 2.43: порог маски структуры. 0 — линейный unsharp (историческое
+    // поведение), >0 — усиление пропорционально локальному контрасту, чтобы не
+    // раздувать зерно и остаток решётки на плашках.
+    let us_mask = std::env::var("DESCREEN_US_MASK")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.0);
     let (mut toned, mut us_amount, mut us_sharp) = if no_unsharp {
         (toned, 0.0f32, 0.0f32)
     } else {
-        crate::unsharp::adaptive_unsharp_cap_s(&toned, us_ref, us_max, us_target, us_sigma)
+        crate::unsharp::adaptive_unsharp_ex(
+            &toned, us_ref, us_max, us_target, us_sigma, us_mask,
+        )
     };
     let mut b_used = b;
     if !no_unsharp && us_sharp < 0.90 && b > 0.4 {
         let (orig_sharp, orig_amt) = (us_sharp, us_amount);
         for bf in [0.4f32, 0.15] {
             let t2 = finish(&out, k_final, bf);
-            let (o2, a2, s2) =
-                crate::unsharp::adaptive_unsharp_cap_s(&t2, &img, us_max, us_target, us_sigma);
+            let (o2, a2, s2) = crate::unsharp::adaptive_unsharp_ex(
+                &t2, &img, us_max, us_target, us_sigma, us_mask,
+            );
             if s2 > us_sharp {
                 toned = o2;
                 us_amount = a2;
