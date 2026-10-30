@@ -23,6 +23,14 @@ class LossConfig:
     focal_gamma: float = 0.0  # focal-frequency: вес |fp-ft|^gamma (0 = обычный Fourier_Mag)
     w_aux: float = 0.0  # deep supervision: вес aux-головы 1/2 разрешения (0 = выкл)
     w_grad: float = 0.0  # Sobel-градиент L1: привязка ГРАНИЦ pred к GT (против извилистых контуров)
+    # 2.43: лосс, взвешенный по полосе несущей. Радиус r известен для каждого
+    # кадра (манифест симулятора), поэтому кольцо растра можно задать явно:
+    # вес 1 + band_k * exp(-((f - r)/band_bw)^2). Глобальный Fourier_Mag
+    # размазывает вес по всему спектру, а кольцо несущей — доли процента
+    # коэффициентов, из-за чего остаток решётки и доживает до выхода.
+    band_w: float = 0.0
+    band_bw: float = 0.02
+    band_k: float = 20.0
 
 
 def _grad_mag(x: torch.Tensor) -> torch.Tensor:
@@ -54,6 +62,18 @@ class CompositeLoss(nn.Module):
         self.lpips = lpips.LPIPS(net=self.cfg.lpips_net)
         for p in self.lpips.parameters():
             p.requires_grad_(False)
+        self._rad: dict[tuple[int, int], torch.Tensor] = {}
+
+    def _band_weight(self, h: int, w: int, r: torch.Tensor) -> torch.Tensor:
+        """(B,1,H,W/2+1) — усиление полосы несущей вокруг r (2.43)."""
+        rad = self._rad.get((h, w))
+        if rad is None:
+            fy = torch.fft.fftfreq(h, device=r.device)[:, None]
+            fx = torch.fft.rfftfreq(w, device=r.device)[None, :]
+            rad = torch.sqrt(fx * fx + fy * fy)
+            self._rad[(h, w)] = rad
+        d = rad.unsqueeze(0) - r.view(-1, 1, 1).to(rad.dtype)
+        return 1.0 + self.cfg.band_k * torch.exp(-((d / self.cfg.band_bw) ** 2))
 
     def pixel_loss(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         d = pred - target
@@ -62,7 +82,8 @@ class CompositeLoss(nn.Module):
         return torch.mean(torch.abs(d))
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                aux: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+                aux: torch.Tensor | None = None,
+                r: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
         loss_l1 = self.pixel_loss(pred, target)
         loss_ms = 1.0 - self.ms_ssim(pred, target)
         fp = torch.abs(torch.fft.rfft2(pred, norm="ortho"))
@@ -74,6 +95,11 @@ class CompositeLoss(nn.Module):
             loss_fourier = torch.mean(w * diff / (ft.mean() + 1e-6))
         else:
             loss_fourier = torch.mean(diff / (ft.mean() + 1e-6))
+        if self.cfg.band_w > 0 and r is not None:
+            bw_ = self._band_weight(pred.shape[2], pred.shape[3], r)
+            loss_band = torch.mean(bw_.unsqueeze(1) * diff / (ft.mean() + 1e-6))
+        else:
+            loss_band = torch.zeros((), device=pred.device)
         if self.cfg.w_lpips > 0:
             loss_lpips = self.lpips(2.0 * pred - 1.0, 2.0 * target - 1.0).mean()
         else:
@@ -104,6 +130,7 @@ class CompositeLoss(nn.Module):
             + self.cfg.w_edge * loss_edge
             + self.cfg.w_tone * loss_tone
             + self.cfg.w_grad * loss_grad
+            + self.cfg.band_w * loss_band
         )
         aux_out = torch.zeros((), device=pred.device)
         if aux is not None and self.cfg.w_aux > 0:
@@ -115,6 +142,7 @@ class CompositeLoss(nn.Module):
             "l1": loss_l1.detach(),
             "ms_ssim": loss_ms.detach(),
             "fourier": loss_fourier.detach(),
+            "band": loss_band.detach(),
             "lpips": loss_lpips.detach(),
             "edge": loss_edge.detach(),
             "tone": loss_tone.detach(),

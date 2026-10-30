@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 
 class DescreenDataset(Dataset):
     def __init__(self, root: str | Path | list, split: str = "train", extra_dct: bool = False,
-                 cond: bool = False, cond_drop: float = 0.0):
+                 cond: bool = False, cond_drop: float = 0.0, with_r: bool = False):
         roots = [Path(r) for r in (root if isinstance(root, (list, tuple)) else [root])]
         self.scans: list[Path] = []
         self.gts: list[Path] = []
@@ -31,6 +31,21 @@ class DescreenDataset(Dataset):
         # Отсутствие файла или id -> нулевой вектор.
         self.cond = cond
         self.cond_drop = cond_drop
+        self.with_r = with_r
+        self._r: dict[str, float] = {}
+        if with_r:
+            # 2.43: r кадра из манифеста сплита — для лосса по полосе несущей.
+            import json as _json
+            for r in roots:
+                p = r / split / "manifest.jsonl"
+                if not p.exists():
+                    continue
+                for line in p.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line:
+                        row = _json.loads(line)
+                        if "r" in row:
+                            self._r[row["id"]] = float(row["r"])
         self._a0: dict[tuple[str, str], list[float]] = {}
         if cond:
             from ml.model.film import build_cond_vec
@@ -63,6 +78,10 @@ class DescreenDataset(Dataset):
             feat = dct_channels(lum)
             scan = np.concatenate([scan, feat], axis=-1)
         stem = self.scans[i].stem
+        out = [to_t(scan), to_t(gt), stem]
         if self.cond:
-            return to_t(scan), to_t(gt), stem, self.cond_vec(self.roots[i].name, stem)
-        return to_t(scan), to_t(gt), stem
+            out.append(self.cond_vec(self.roots[i].name, stem))
+        if self.with_r:
+            # 2.43: радиус несущей кадра — для лосса, взвешенного по полосе.
+            out.append(torch.tensor(self._r.get(stem, 0.0), dtype=torch.float32))
+        return tuple(out)

@@ -60,6 +60,10 @@ class TrainConfig:
     l1_type: str = "l1"  # "l1" | "charbonnier"
     focal_gamma: float = 0.0  # focal-frequency вес (0 = обычный Fourier_Mag)
     grad_w: float = 0.0  # Sobel-градиент L1: привязка границ pred к GT (против извилистых контуров)
+    # 2.43: лосс, взвешенный по полосе несущей (радиус r из манифеста).
+    band_w: float = 0.0
+    band_bw: float = 0.02
+    band_k: float = 20.0
     aux_loss: float = 0.0  # deep supervision: вес aux-головы 1/2 (0 = выкл)
     ff_norm: bool = False
     ff_zero_init: bool = False
@@ -201,9 +205,10 @@ def train(cfg: TrainConfig) -> dict:
     (out / "config.json").write_text(json.dumps(asdict(cfg), indent=1), encoding="utf-8")
     train_roots = [cfg.data] + [r for r in cfg.data_extra.split(";") if r]
     train_ds = DescreenDataset(train_roots, "train", extra_dct=cfg.extra_dct,
-                               cond=cfg.cond, cond_drop=cfg.cond_drop if cfg.cond else 0.0)
+                               cond=cfg.cond, cond_drop=cfg.cond_drop if cfg.cond else 0.0,
+                               with_r=cfg.band_w > 0)
     val_ds = DescreenDataset(cfg.data_val or cfg.data, "val", extra_dct=cfg.extra_dct,
-                             cond=cfg.cond, cond_drop=0.0)
+                             cond=cfg.cond, cond_drop=0.0, with_r=cfg.band_w > 0)
     if cfg.hard_boost:
         rw: dict[str, float] = {}
         for item in cfg.root_weights.split(","):
@@ -314,6 +319,7 @@ def train(cfg: TrainConfig) -> dict:
         for batch in train_dl:
             xs, ys = batch[0].cuda(non_blocking=True), batch[1].cuda(non_blocking=True)
             cc = batch[3].cuda(non_blocking=True) if cfg.cond else None
+            r_b = batch[-1].cuda(non_blocking=True) if cfg.band_w > 0 else None
             # ВАЖНО: лосс считается ВНЕ autocast. MS-SSIM и FFT-члены в fp16
             # (внутри autocast) дают inf-градиенты на малых дисперсиях →
             # scaler схлопывается, обучение расходится (найдено 2026-10-09).
@@ -326,9 +332,9 @@ def train(cfg: TrainConfig) -> dict:
                 else:
                     pred = model(xs)
             if cfg.aux_loss > 0:
-                L = loss_fn(pred.float(), ys, aux=_auxs[0].float())
+                L = loss_fn(pred.float(), ys, aux=_auxs[0].float(), r=r_b)
             else:
-                L = loss_fn(pred.float(), ys)
+                L = loss_fn(pred.float(), ys, r=r_b)
             scaler.scale(L["total"] / ga).backward()
             tot += float(L["total"].detach())
             n += 1
@@ -575,6 +581,12 @@ def main() -> None:
     ap.add_argument("--focal-gamma", type=float, default=0.0)
     ap.add_argument("--grad-w", type=float, default=0.0,
                     help="вес Sobel-градиентного лосса (привязка границ к GT)")
+    ap.add_argument("--band-w", type=float, default=0.0,
+                    help="вес лосса по полосе несущей (нужен r из манифеста)")
+    ap.add_argument("--band-bw", type=float, default=0.02,
+                    help="полуширина кольца несущей, c/px")
+    ap.add_argument("--band-k", type=float, default=20.0,
+                    help="усиление внутри кольца несущей относительно остального спектра")
     ap.add_argument("--aux-loss", type=float, default=0.0,
                     help="deep supervision: вес aux-головы 1/2 разрешения")
     ap.add_argument("--ff-norm", type=int, default=0,
@@ -628,6 +640,9 @@ def main() -> None:
         l1_type=args.l1_type,
         focal_gamma=args.focal_gamma,
         grad_w=args.grad_w,
+        band_w=args.band_w,
+        band_bw=args.band_bw,
+        band_k=args.band_k,
         aux_loss=args.aux_loss,
         ff_norm=bool(args.ff_norm),
         ff_zero_init=bool(args.ff_zero_init),
