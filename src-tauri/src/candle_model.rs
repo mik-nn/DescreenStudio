@@ -225,13 +225,26 @@ impl FourierUNet {
     ) -> Result<Tensor, candle_core::Error> {
         // Зеркалит ml/model/unet.py: GELU после inc/down/up, skip-connections
         // (feats — выходы энкодеров до down), выход = clamp(x - residual, 0, 1).
-        let dump = std::env::var("CANDLE_DUMP").is_ok();
+        let dump_dir = std::env::var("CANDLE_DUMP_DIR").ok();
+        let dump = dump_dir.is_some() || std::env::var("CANDLE_DUMP").is_ok();
         let stat = |t: &Tensor, tag: &str| {
             if dump {
                 if let Ok(v) = t.flatten_all().and_then(|f| f.to_vec1::<f32>()) {
                     let m = v.iter().sum::<f32>() / v.len() as f32;
                     let var = v.iter().map(|a| (a - m) * (a - m)).sum::<f32>() / v.len() as f32;
                     eprintln!("stage {tag}: mean={m:.5} std={:.5} first4={:?}", var.sqrt(), &v[..4]);
+                    if let Some(dir) = &dump_dir {
+                        let dims = t.dims().to_vec();
+                        let _ = std::fs::write(
+                            format!("{dir}/rust_{tag}.dims"),
+                            dims.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(" "),
+                        );
+                        let mut bytes = Vec::with_capacity(v.len() * 4);
+                        for a in &v {
+                            bytes.extend_from_slice(&a.to_le_bytes());
+                        }
+                        let _ = std::fs::write(format!("{dir}/rust_{tag}.bin"), bytes);
+                    }
                 }
             }
         };
@@ -294,6 +307,56 @@ mod tests {
                 ((s >> 40) as u32 & 0xFFFFFF) as f32 / 16_777_215.0
             })
             .collect()
+    }
+
+    /// Постадийный паритет с torch: читает `Temp/parity/in.bin` (f32, 3xHxW),
+    /// гоняет модель и пишет стадии в `Temp/parity/rust_<stage>.bin`
+    /// (см. `Temp/parity_torch.py`). Пропускается, если входа нет.
+    #[test]
+    fn parity_stages_dump() -> Result<(), candle_core::Error> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let dir = std::env::var("PARITY_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| root.join("Temp").join("parity"));
+        let inp = std::env::var("PARITY_IN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| dir.join("in.bin"));
+        if !inp.exists() {
+            eprintln!("skip: {} not found", inp.display());
+            return Ok(());
+        }
+        let model_path = match std::env::var("PARITY_MODEL") {
+            Ok(p) => std::path::PathBuf::from(p),
+            Err(_) => root
+                .join("ml/train/_chain_native_band/descreen_chain_native_band.safetensors"),
+        };
+        let dev = Device::Cpu;
+        let model = FourierUNet::load(&dev, DType::F32, model_path.to_str().unwrap())?;
+
+        let raw = std::fs::read(&inp).unwrap();
+        let n = raw.len() / 4;
+        let data: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let side = ((n / 3) as f64).sqrt() as usize;
+        let xs = Tensor::from_vec(data, (1, 3, side, side), &dev)?;
+        let cond = Tensor::from_vec(vec![0.2f32, 1.0, -0.7, 0.7], (1, 4), &dev)?;
+
+        std::env::set_var("CANDLE_DUMP_DIR", &dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = model.forward_cond(&xs, Some(&cond))?;
+        let v = out.flatten_all()?.to_vec1::<f32>()?;
+        let mut bytes = Vec::with_capacity(v.len() * 4);
+        for a in &v {
+            bytes.extend_from_slice(&a.to_le_bytes());
+        }
+        std::fs::write(dir.join("rust_out.bin"), &bytes).unwrap();
+        eprintln!("parity dump -> {}", dir.display());
+        Ok(())
     }
 
     #[test]

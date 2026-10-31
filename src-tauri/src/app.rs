@@ -287,16 +287,35 @@ pub fn descreen_file(
     let gscale = std::env::var("DESCREEN_BLEND_GUARD")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.35);
+        .unwrap_or(0.0);
     pcfg.blend_hi_strength *= gscale;
     pcfg.blend_sh_strength *= gscale;
     pcfg.blend_edge_guard *= gscale;
+    // 2.48: gated backoff — порог по top-4 пикам Фурье. Пики считаются и по
+    // контенту, поэтому сеть (она резче префильтра) стабильно «проваливает»
+    // гейт и её поправка урезается вдвое (`backoff_w=0.5`): половина кадра
+    // возвращается к префильтру, где остаток растра и живёт. `DESCREEN_BACKOFF=0`
+    // — отключить (проверка вклада).
+    if let Ok(v) = std::env::var("DESCREEN_BACKOFF") {
+        pcfg.backoff_enabled = v != "0";
+    }
     // Найквист–Котельников режим (2.27→продукт): приводим период растра к
     // 2 px (r=0.5), вся цепочка работает в этом разрешении, результат
     // возвращается в исходный размер (Lanczos3).
-    // `DESCREEN_NATIVE=1` — нативный режим (2.40): рабочий кадр = скан, ни
-    // даунсэмпла, ни апскейла, снятие растра — целиком на сети.
-    let native_mode = std::env::var("DESCREEN_NATIVE").map(|v| v != "0").unwrap_or(false);
+    // 2.48: рабочий режим продукта — НАТИВНЫЙ (рабочий кадр = скан, ни
+    // даунсэмпла, ни апскейла): сеть обучена на сырых сканах, поэтому чистая
+    // сеть без классического префильтра даёт лучший результат (см. ниже
+    // `v1_on`). `DESCREEN_NATIVE=0` возвращает до-2.48 поведение, `=1`
+    // форсирует нативный режим и при запрошенном Найквисте.
+    let native_mode = std::env::var("DESCREEN_NATIVE")
+        .map(|v| v != "0")
+        .unwrap_or(!nyquist);
+    // 2.48: backoff (гейт по top-4 пикам) в нативном режиме по умолчанию выкл.
+    // Он срабатывает почти на каждом скане и режет поправку сети вдвое
+    // (`backoff_w=0.5`), возвращая половину префильтра с остатком растра.
+    if native_mode && std::env::var("DESCREEN_BACKOFF").is_err() {
+        pcfg.backoff_enabled = false;
+    }
     let nyq = if nyquist && !native_mode {
         crate::nyquist::plan_with(&img, &pcfg, &crate::nyquist::NyqCfg::from_env())
     } else {
@@ -316,7 +335,17 @@ pub fn descreen_file(
     // 0.244 при conf 0.03, V1 не сработал, кольцевой notch вырезал не ту
     // полосу, и unsharp усилил неснятую решётку. Считается ОДИН раз: V1,
     // радиус кольца и FiLM-cond должны видеть одну и ту же несущую.
-    let est_native = if v1_enabled || nyquist || native_mode {
+    // 2.48: в нативном режиме V1 по умолчанию ВЫКЛЮЧЕН. Сеть обучена на
+    // СЫРЫХ сканах (`Data/chain_native`: scan = скан с растром, gt = чистый),
+    // а V1+кольцо сильно смягчают вход (лапласиан 27% от скана) — это уводит
+    // вход из обучающего распределения, и сеть отдаёт мыло. Замер 1821146u:
+    // bandE входа 0.112 -> выхода 0.0007 (0.6%) при подаче сырого кадра.
+    // `DESCREEN_V1=1` возвращает классику принудительно.
+    let v1_on = match std::env::var("DESCREEN_V1") {
+        Ok(v) => v != "0",
+        Err(_) => v1_enabled && !native_mode,
+    };
+    let est_native = if v1_on || nyquist || native_mode {
         crate::prefilter::estimate_raster_multi(&luma_of(&img), &pcfg, 1024, 3)
     } else {
         crate::prefilter::estimate_raster(&luma_of(&img), &pcfg, 1024)
@@ -336,7 +365,7 @@ pub fn descreen_file(
     // полосы АМ складываются. `plan()` уже посчитан по исходному изображению,
     // так что масштаб нормализации вычитание не портит.
     let v1_cfg = crate::v1::V1Cfg::from_env();
-    let v1_acted = if v1_enabled {
+    let v1_acted = if v1_on {
         let band0 = crate::prefilter::band_energy_abs(&luma_of(&img), 0.40 * est_native.r / 0.5, 0.50 * est_native.r / 0.5);
         let t1 = Instant::now();
         let rep = crate::v1::apply(&mut img, est_native.r, &v1_cfg, &pcfg, 1024);
@@ -429,8 +458,10 @@ pub fn descreen_file(
     // Классический notch остаётся как исходная стадия, но при сработавшем V1
     // он уже не нужен: растр снят вычитанием, а «прокол» спектра только
     // добавляет рингинг (замер 2.31: на Pack +34% энергии полосы). Режим:
-    // DESCREEN_NOTCH=auto (по умолчанию) | off | force.
-    let notch_mode = std::env::var("DESCREEN_NOTCH").unwrap_or_else(|_| "auto".into());
+    // DESCREEN_NOTCH=auto | off | force. В нативном режиме по умолчанию off:
+    // notch фильтрует ВХОД сети, а она обучена на сырых сканах (2.48).
+    let notch_mode = std::env::var("DESCREEN_NOTCH")
+        .unwrap_or_else(|_| if native_mode { "off".into() } else { "auto".into() });
     let skip_notch = match notch_mode.as_str() {
         "off" => true,
         "force" => false,
@@ -489,7 +520,10 @@ pub fn descreen_file(
     // (Temp/lf_value.py): notch 18.74 дБ → notch+LF 17.42 дБ, то есть стадия
     // снимает контент вместе с полосой. Оставлена переключаемой для A/B:
     // DESCREEN_LF=off | force (по умолчанию force — прежнее поведение).
-    let lf_mode = std::env::var("DESCREEN_LF").unwrap_or_else(|_| "auto".into());
+    // DESCREEN_LF=off | force | auto. В нативном режиме по умолчанию off:
+    // стадия меняет вход сети (2.48 — сеть ждёт сырой скан).
+    let lf_mode = std::env::var("DESCREEN_LF")
+        .unwrap_or_else(|_| if native_mode { "off".into() } else { "auto".into() });
     let skip_lf = lf_mode == "off";
     let t00 = Instant::now();
     let pre = if skip_lf || bands.is_empty() {
@@ -553,12 +587,33 @@ pub fn descreen_file(
     let elapsed_ms = t0.elapsed().as_millis() as u64;
     let b = blend.clamp(0.0, 1.0);
     let wmap = blend_map(&img, &pcfg);
+    if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+        let (mut mn, mut mx, mut sum) = (f32::MAX, f32::MIN, 0f64);
+        for y in 0..hu {
+            for x in 0..wu {
+                let v = wmap[[y, x]];
+                mn = mn.min(v);
+                mx = mx.max(v);
+                sum += v as f64;
+            }
+        }
+        eprintln!(
+            "[stage] wmap min={mn:.3} mean={:.3} max={mx:.3} b={b:.2}",
+            sum / (hu * wu) as f64
+        );
+    }
     // Full post-net tail (blend -> paper background -> tone), parameterized by
     // the correction scale k: net_corr = pre + k * (net - pre). Parity with
     // `ml/preproc/backoff.apply_global` net_raw before `finish`. b_use — вес
     // нейросети (адаптивный спад ниже, см. blend-fallback).
     let finish = |net: &ndarray::Array3<f32>, k: f32, b_use: f32|
      -> ndarray::Array3<f32> {
+        // DESCREEN_NET_ONLY=1 — отдаём чистый выход сети (без blend-карты,
+        // возврата фона бумаги и тоновой нормировки). Нужен для паритета
+        // torch<->candle: torch-модель возвращает ровно `clamp(x - residual)`.
+        if std::env::var("DESCREEN_NET_ONLY").map(|v| v != "0").unwrap_or(false) {
+            return net.clone();
+        }
         let mut blended = ndarray::Array3::<f32>::zeros((3, hu, wu));
         for ch in 0..3 {
             for y in 0..hu {
@@ -569,8 +624,16 @@ pub fn descreen_file(
                 }
             }
         }
-        let swapped = return_background(&img, &blended, pcfg.bg_sigma);
-        linear_tone(&swapped, &img)
+        let swapped = if std::env::var("DESCREEN_NO_BG").map(|v| v != "0").unwrap_or(false) {
+            blended
+        } else {
+            return_background(&img, &blended, pcfg.bg_sigma)
+        };
+        if std::env::var("DESCREEN_NO_TONE").map(|v| v != "0").unwrap_or(false) {
+            swapped
+        } else {
+            linear_tone(&swapped, &img)
+        }
     };
     let t00 = Instant::now();
     let mut toned = finish(&out, 1.0, b);
@@ -604,14 +667,27 @@ pub fn descreen_file(
     // с лучшей резкостью.
     let t00 = Instant::now();
     let k_final = if backoff_fired { pcfg.backoff_w } else { 1.0 };
-    let no_unsharp = std::env::var_os("DESCREEN_NO_UNSHARP").is_some();
+    let no_unsharp = std::env::var("DESCREEN_NO_UNSHARP")
+        .map(|v| v != "0")
+        .unwrap_or(false);
     // Потолок amount: DESCREEN_US_MAX (по умолчанию AMOUNT_MAX). Петля целится
     // в sharp=1.0 относительно скана, а в Найквист-режиме эта цель держится
     // остатком растра — без потолка она раздувает полосу 0.02–0.08 (2.39).
+    // 2.48: в нативном режиме опора петли — СЫРОЙ скан, чей лапласиан раздут
+    // растром в 10–250× (на синтетике gt/scan = 0.004…0.11), поэтому цель
+    // 1.3 недостижима и петля всегда упиралась в потолок 1.92. Замер свипа
+    // (12 val-кадров): без unsharp 31.96 дБ / 0.8739, при amount 0.5 — 31.59 /
+    // 0.868, при 1.8 — 30.16 / 0.842. То есть обратная связь здесь меряет
+    // растр, а не резкость. Берём ФИКСИРОВАННЫЕ 0.5 (потолок = стартовый шаг
+    // петли, дальше расти некуда) — глазами это «чуть резче» без крупы.
     let us_max = std::env::var("DESCREEN_US_MAX")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(crate::unsharp::AMOUNT_MAX);
+        .unwrap_or(if native_mode {
+            0.5
+        } else {
+            crate::unsharp::AMOUNT_MAX
+        });
     // Опорный кадр для петли резкости. `scan` — историческое поведение
     // (сравнение со сканом), `pre` — с пре-стейджем: в нативном режиме скан
     // содержит растр, и петля «догоняет» его ВЧ, усиливая остаток (2.40).
@@ -649,12 +725,15 @@ pub fn descreen_file(
         )
     };
     let mut b_used = b;
-    if !no_unsharp && us_sharp < 0.90 && b > 0.4 {
+    let no_fallback = std::env::var("DESCREEN_NO_FALLBACK")
+        .map(|v| v != "0")
+        .unwrap_or(native_mode);
+    if !no_unsharp && !no_fallback && us_sharp < 0.90 && b > 0.4 {
         let (orig_sharp, orig_amt) = (us_sharp, us_amount);
         for bf in [0.4f32, 0.15] {
             let t2 = finish(&out, k_final, bf);
             let (o2, a2, s2) = crate::unsharp::adaptive_unsharp_ex(
-                &t2, &img, us_max, us_target, us_sigma, us_mask,
+                &t2, us_ref, us_max, us_target, us_sigma, us_mask,
             );
             if s2 > us_sharp {
                 toned = o2;
@@ -907,6 +986,15 @@ mod tests {
         use crate::prefilter::{luma_of, screen_band_energy};
         use ndarray::Array3;
 
+        // 2.48: в нативном режиме (дефолт продукта) растр снимает ТОЛЬКО сеть —
+        // классический префильтр (notch/V1/LF) намеренно выключен, потому что
+        // обучена она на сырых сканах. Этот тест про классическую цепочку,
+        // поэтому режим переключается на прежний (`DESCREEN_NATIVE=0`).
+        // Переменная восстанавливается до выхода: остальные тесты её не видят
+        // (Найквист-тесты и так работают с native_mode=false).
+        let prev_native = std::env::var("DESCREEN_NATIVE").ok();
+        std::env::set_var("DESCREEN_NATIVE", "0");
+
         runtime::prepare_runtime().unwrap();
         let model = runtime::resolve_model(None).unwrap();
         let eng = InferenceEngine::new(&model.to_string_lossy(), Ep::Cpu).expect("cpu session");
@@ -966,6 +1054,10 @@ mod tests {
         ms /= (h * w) as f64;
         mo /= (h * w) as f64;
         assert!((ms - mo).abs() < 0.03, "tone must hold: {ms} vs {mo}");
+        match prev_native {
+            Some(v) => std::env::set_var("DESCREEN_NATIVE", v),
+            None => std::env::remove_var("DESCREEN_NATIVE"),
+        }
     }
 
     #[test]

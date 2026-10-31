@@ -23,7 +23,10 @@
 
   let aiBlend = $state(0.85);
   let nyquistMode = $state(false);
-  let v1Mode = $state(true);
+  // 2.48: сеть обучена на СЫРЫХ сканах, поэтому классический V1-префильтр в
+  // нативном режиме по умолчанию выключен — он уводит вход из обучающего
+  // распределения. V1 имеет смысл только в Найквист-режиме.
+  let v1Mode = $state(false);
   let isProcessing = $state(false);
   let isLoading = $state(false);
   let imagePath = $state<string | null>(null);
@@ -298,12 +301,12 @@
       </label>
 
       <label class="flex flex-col gap-1 text-xs text-neutral-400">
-        <span class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" bind:checked={v1Mode} class="accent-indigo-500" />
+        <span class="flex items-center gap-2 {nyquistMode ? 'cursor-pointer' : 'cursor-not-allowed opacity-50'}">
+          <input type="checkbox" bind:checked={v1Mode} disabled={!nyquistMode} class="accent-indigo-500" />
           <span
-            title="Оценивает огибающую и фазу растра в нативном разрешении, синтезирует и ВЫЧИТАЕТ его (вместо вырезания полосы). Заменяет notch там, где растр когерентен"
+            title="Оценивает огибающую и фазу растра в нативном разрешении, синтезирует и ВЫЧИТАЕТ его (вместо вырезания полосы). Работает только в Найквист-режиме: в нативном сеть обучена на сырых сканах и сама снимает растр"
           >
-            V1: вычитание растра по фазе
+            V1: вычитание растра по фазе (только Найквист)
           </span>
         </span>
       </label>
