@@ -1090,7 +1090,39 @@ pub fn subtract_lf(img: &Array3<f32>, bands: &[LFBand], cfg: &PrefilterCfg) -> A
 // Paper background return + linear tone
 // ---------------------------------------------------------------------------
 
+/// Гауссов НЧ-фильтр (σ в пикселях) — реализация на FFT.
+///
+/// ВАЖНО: FFT считает ЦИКЛИЧЕСКУЮ свёртку. Без паддинга НЧ-оценка на краю
+/// кадра подмешивает содержимое ПРОТИВОПОЛОЖНОГО края: при σ=32 это первые и
+/// последние ~100 px. Именно из-за этого в 2.48 по левому и правому краю
+/// кадра пошли полосы (на 1821146u выход у левой кромки 0.16 против 0.22 в
+/// глубине, на Magazine — 0.94 против 0.88). Поэтому кадр предварительно
+/// растягивается replicate-заливкой на `3σ` и обрезается обратно.
 fn gaussian_lowpass_channel(ch: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
+    let pad = (3.0 * sigma).ceil() as usize;
+    if pad == 0 {
+        return gaussian_lowpass_core(ch, h, w, sigma);
+    }
+    let (hp, wp) = (h + 2 * pad, w + 2 * pad);
+    let mut padded = vec![0.0f32; hp * wp];
+    for y in 0..hp {
+        let sy = y.clamp(pad, h + pad - 1) - pad;
+        for x in 0..wp {
+            let sx = x.clamp(pad, w + pad - 1) - pad;
+            padded[y * wp + x] = ch[sy * w + sx];
+        }
+    }
+    let blurred = gaussian_lowpass_core(&padded, hp, wp, sigma);
+    let mut out = vec![0.0f32; h * w];
+    for y in 0..h {
+        out[y * w..(y + 1) * w].copy_from_slice(
+            &blurred[(y + pad) * wp + pad..(y + pad) * wp + pad + w],
+        );
+    }
+    out
+}
+
+fn gaussian_lowpass_core(ch: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
     let mut buf: Vec<Complex32> = ch.iter().map(|&v| Complex32::new(v, 0.0)).collect();
     // separable rows (w) then cols (h); gaussian factors on unshifted grids
     let mut pr = FftPlanner::<f32>::new();
@@ -1149,6 +1181,152 @@ pub fn return_background(src: &Array3<f32>, net: &Array3<f32>, sigma: f32) -> Ar
         let bg_n = gaussian_lowpass_channel(&n, h, w, sigma);
         for k in 0..h * w {
             out[[ch, k / w, k % w]] = (bg_s[k] + (n[k] - bg_n[k])).clamp(0.0, 1.0);
+        }
+    }
+    out
+}
+
+/// Раздельный гауссов blur с железным краем (clamp) и радиусом 3σ.
+///
+/// Для малых σ (страховка тона, σ=3) он дешевле и, главное, экономнее по
+/// памяти, чем FFT-путь: нет ни паддинг-копии кадра, ни буфера `Complex32`
+/// (на `Calendar1` 7650×12724 это 0.8–1.5 ГБ разницы).
+fn gaussian_blur_rect(a: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
+    let r = (3.0 * sigma).ceil().max(1.0) as usize;
+    let mut k = vec![0.0f32; 2 * r + 1];
+    let mut sum = 0.0f32;
+    for (i, v) in k.iter_mut().enumerate() {
+        let d = i as f32 - r as f32;
+        *v = (-0.5 * (d / sigma).powi(2)).exp();
+        sum += *v;
+    }
+    for v in k.iter_mut() {
+        *v /= sum;
+    }
+    let mut tmp = vec![0.0f32; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            let mut s = 0.0f32;
+            for (i, kv) in k.iter().enumerate() {
+                let sx = (x as isize + i as isize - r as isize).clamp(0, w as isize - 1) as usize;
+                s += kv * a[y * w + sx];
+            }
+            tmp[y * w + x] = s;
+        }
+    }
+    let mut out = vec![0.0f32; h * w];
+    for x in 0..w {
+        for y in 0..h {
+            let mut s = 0.0f32;
+            for (i, kv) in k.iter().enumerate() {
+                let sy = (y as isize + i as isize - r as isize).clamp(0, h as isize - 1) as usize;
+                s += kv * tmp[sy * w + x];
+            }
+            out[y * w + x] = s;
+        }
+    }
+    out
+}
+
+/// Прямоугольный box-blur (раздельный, O(h·w), clamp по краям).
+///
+/// Раньше здесь была интегральная карта в f64: на кадре `Calendar1`
+/// (7650×12724) это 790 МБ только под одну матрицу, а нужна она дважды.
+fn box_blur_rect(a: &[f32], h: usize, w: usize, win: usize) -> Vec<f32> {
+    let r = (win / 2).max(1);
+    let norm = (2 * r + 1) as f32;
+    let mut tmp = vec![0.0f32; h * w];
+    // горизонтальный проход
+    let mut pref = vec![0.0f32; w + 1];
+    for y in 0..h {
+        pref[0] = 0.0;
+        for x in 0..w {
+            pref[x + 1] = pref[x] + a[y * w + x];
+        }
+        for x in 0..w {
+            let lo = x.saturating_sub(r);
+            let hi = (x + r + 1).min(w);
+            let mut s = pref[hi] - pref[lo];
+            let left_missing = (r as isize - x as isize).max(0) as f32;
+            let right_missing = ((x + r + 1) as isize - w as isize).max(0) as f32;
+            s += left_missing * a[y * w] + right_missing * a[y * w + w - 1];
+            tmp[y * w + x] = s / norm;
+        }
+    }
+    // вертикальный проход
+    let mut out = vec![0.0f32; h * w];
+    let mut pref = vec![0.0f32; h + 1];
+    for x in 0..w {
+        pref[0] = 0.0;
+        for y in 0..h {
+            pref[y + 1] = pref[y] + tmp[y * w + x];
+        }
+        for y in 0..h {
+            let lo = y.saturating_sub(r);
+            let hi = (y + r + 1).min(h);
+            let mut s = pref[hi] - pref[lo];
+            let top_missing = (r as isize - y as isize).max(0) as f32;
+            let bot_missing = ((y + r + 1) as isize - h as isize).max(0) as f32;
+            s += top_missing * tmp[x] + bot_missing * tmp[(h - 1) * w + x];
+            out[y * w + x] = s / norm;
+        }
+    }
+    out
+}
+
+/// Локальная тоновая страховка для нативного режима (2.49).
+///
+/// Что лечит (замер на 11 реальных сканах): в областях без структуры — белая
+/// бумага, плашки, блики — сеть уводит средний уровень на 2–6 уровней и
+/// рисует пятна с периодом 8–40 px (на 1821146u у левой кромки выход 0.146
+/// против 0.212 в скане; в белом блоке 512² энергия полосы 8–16 px 0.64
+/// уровня против 0.28 у скана, 16–32 px — 0.51 против 0.20). Это и есть
+/// «пятнистый белый».
+///
+/// Операция: `out = net + (1 - m) * (LP(src) - LP(net))`, где `LP` — гаусс с
+/// малым σ, а `m` — маска структурности скана (0 = гладкая бумага, 1 =
+/// растр/текст/край). Растр в это не попадает: при r≈0.149 и σ=3 усиление
+/// фильтра на несущей exp(-0.5·(2π·0.149·3)²) ≈ 0.02, то есть переносится
+/// только НЧ-составляющая скана (тон и освещённость), а ВЧ выхода сети
+/// (включая снятый растр) остаётся нетронутой. Маска нужна, чтобы не отменять
+/// осмысленные крупномасштабные правки сети в структурных зонах.
+pub fn local_tone_guard(
+    net: &Array3<f32>,
+    src: &Array3<f32>,
+    sigma: f32,
+    s0: f32,
+    s1: f32,
+) -> Array3<f32> {
+    let (c, h, w) = (net.shape()[0], net.shape()[1], net.shape()[2]);
+    // Структурность скана: |luma - box5(luma)|, сглаженная box9. На белой
+    // бумаге 0.001–0.004, на растре/тексте 0.02–0.06 (замер по 11 сканам).
+    // Всё, кроме итоговой маски, живёт в своём блоке: на кадре 97 МП каждый
+    // такой буфер — 390 МБ, держать пять штук до конца незачем.
+    let mask = {
+        let lm: Vec<f32> = {
+            let a = luma_of(src);
+            (0..h * w).map(|k| a[[k / w, k % w]]).collect()
+        };
+        let lp5 = box_blur_rect(&lm, h, w, 5);
+        let hi: Vec<f32> = (0..h * w).map(|k| (lm[k] - lp5[k]).abs()).collect();
+        let act = box_blur_rect(&hi, h, w, 9);
+        let raw_mask: Vec<f32> = act
+            .iter()
+            .map(|&a| ((a - s0) / (s1 - s0 + 1e-9)).clamp(0.0, 1.0))
+            .collect();
+        // Маску сглаживаем широко, иначе на границе зон появляются ступеньки.
+        box_blur_rect(&raw_mask, h, w, 33)
+    };
+    let mut out = Array3::<f32>::zeros((c, h, w));
+    for ch in 0..c {
+        let s: Vec<f32> = (0..h * w).map(|k| src[[ch, k / w, k % w]]).collect();
+        let n: Vec<f32> = (0..h * w).map(|k| net[[ch, k / w, k % w]]).collect();
+        let lp_s = gaussian_blur_rect(&s, h, w, sigma);
+        let lp_n = gaussian_blur_rect(&n, h, w, sigma);
+        for k in 0..h * w {
+            let wgt = 1.0 - mask[k];
+            out[[ch, k / w, k % w]] =
+                (n[k] + wgt * (lp_s[k] - lp_n[k])).clamp(0.0, 1.0);
         }
     }
     out
@@ -1902,6 +2080,77 @@ mod tests {
                 }
             }
             assert!(((ms - mo) / (h * w) as f64).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn gaussian_lowpass_does_not_wrap_edges() {
+        // 2.49: НЧ-фильтр считался циклической свёрткой по всему кадру, из-за
+        // чего на левом краю подмешивался правый (полосы по краям кадра).
+        let (h, w) = (32usize, 256usize);
+        let mut ch = vec![0.0f32; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                ch[y * w + x] = if x < w / 2 { 0.2 } else { 0.8 };
+            }
+        }
+        let lp = gaussian_lowpass_channel(&ch, h, w, 16.0);
+        let mid = h / 2;
+        let left = lp[mid * w];
+        let right = lp[mid * w + w - 1];
+        assert!(
+            (left - 0.2).abs() < 0.01,
+            "left edge must keep its own tone, got {left}"
+        );
+        assert!(
+            (right - 0.8).abs() < 0.01,
+            "right edge must keep its own tone, got {right}"
+        );
+    }
+
+    #[test]
+    fn local_tone_guard_is_identity_on_matching_frames() {
+        let (c, h, w) = (3usize, 64usize, 96usize);
+        let src = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let base = if (x / 16 + y / 16) % 2 == 0 { 0.85 } else { 0.35 };
+            (base + 0.02 * ch as f32 + 0.01 * ((x + y) % 3) as f32).clamp(0.0, 1.0)
+        });
+        let out = local_tone_guard(&src, &src, 3.0, 0.004, 0.02);
+        let mut worst = 0.0f32;
+        for ch in 0..c {
+            for y in 0..h {
+                for x in 0..w {
+                    worst = worst.max((out[[ch, y, x]] - src[[ch, y, x]]).abs());
+                }
+            }
+        }
+        assert!(worst < 1e-3, "guard must be identity when net == src, worst {worst}");
+    }
+
+    #[test]
+    fn local_tone_guard_restores_flat_tone() {
+        // Плоская бумага: сеть уводит уровень и добавляет пятна 8–40 px —
+        // страховка обязана вернуть средний уровень к скану, сохранив ВЧ.
+        let (c, h, w) = (3usize, 96usize, 96usize);
+        let src = Array3::from_shape_fn((c, h, w), |(ch, _y, _x)| 0.80 - 0.02 * ch as f32);
+        let net = Array3::<f32>::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let blob = 0.03 * ((x as f32 / 9.0).sin() * (y as f32 / 11.0).cos());
+            (src[[ch, y, x]] - 0.06 + blob).clamp(0.0, 1.0)
+        });
+        let out = local_tone_guard(&net, &src, 3.0, 0.004, 0.02);
+        for ch in 0..c {
+            let mut mean = 0.0f64;
+            for y in 0..h {
+                for x in 0..w {
+                    mean += out[[ch, y, x]] as f64;
+                }
+            }
+            mean /= (h * w) as f64;
+            let want = src[[ch, 0, 0]] as f64;
+            assert!(
+                (mean - want).abs() < 0.01,
+                "flat tone must return to the scan: {mean} vs {want}"
+            );
         }
     }
 

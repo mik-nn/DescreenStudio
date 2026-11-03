@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::candle_engine::CandleEngine;
 use crate::inference::{Ep, InferenceEngine, TileParams};
 use crate::prefilter::{
-    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, linear_tone, luma_of,
-    return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
+    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, linear_tone, local_tone_guard,
+    luma_of, return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
 };
 use crate::runtime;
 
@@ -586,8 +586,7 @@ pub fn descreen_file(
         .map_err(|e| format!("inference failed: {e}"))?;
     let elapsed_ms = t0.elapsed().as_millis() as u64;
     let b = blend.clamp(0.0, 1.0);
-    let wmap = blend_map(&img, &pcfg);
-    if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+    let wmap = blend_map(&img, &pcfg);    if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
         let (mut mn, mut mx, mut sum) = (f32::MAX, f32::MIN, 0f64);
         for y in 0..hu {
             for x in 0..wu {
@@ -606,6 +605,27 @@ pub fn descreen_file(
     // the correction scale k: net_corr = pre + k * (net - pre). Parity with
     // `ml/preproc/backoff.apply_global` net_raw before `finish`. b_use — вес
     // нейросети (адаптивный спад ниже, см. blend-fallback).
+    // 2.49: локальная тоновая страховка. В областях без структуры (бумага,
+    // плашки, блики) сеть на сыром входе уводит средний уровень на 2–6 уровней
+    // и рисует пятна 8–40 px — «пятнистый белый». Возвращаем НЧ выхода к НЧ
+    // скана там, где скан гладкий; растр в этот фильтр не проходит (gain на
+    // несущей ≈0.02 при σ=3), ВЧ сети остаются нетронутыми. По умолчанию —
+    // только в нативном режиме, `DESCREEN_TONE_GUARD=1/0` переопределяет.
+    let tg_on = std::env::var("DESCREEN_TONE_GUARD")
+        .map(|v| v != "0")
+        .unwrap_or(native_mode);
+    let tg_sigma = std::env::var("DESCREEN_TG_SIGMA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(3.0);
+    let tg_s0 = std::env::var("DESCREEN_TG_S0")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.004);
+    let tg_s1 = std::env::var("DESCREEN_TG_S1")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(0.020);
     let finish = |net: &ndarray::Array3<f32>, k: f32, b_use: f32|
      -> ndarray::Array3<f32> {
         // DESCREEN_NET_ONLY=1 — отдаём чистый выход сети (без blend-карты,
@@ -629,10 +649,20 @@ pub fn descreen_file(
         } else {
             return_background(&img, &blended, pcfg.bg_sigma)
         };
-        if std::env::var("DESCREEN_NO_TONE").map(|v| v != "0").unwrap_or(false) {
-            swapped
+        let guarded = if tg_on {
+            if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+                eprintln!(
+                    "[stage] tone-guard: sigma={tg_sigma:.2} s0={tg_s0:.4} s1={tg_s1:.4}"
+                );
+            }
+            local_tone_guard(&swapped, &img, tg_sigma, tg_s0, tg_s1)
         } else {
-            linear_tone(&swapped, &img)
+            swapped
+        };
+        if std::env::var("DESCREEN_NO_TONE").map(|v| v != "0").unwrap_or(false) {
+            guarded
+        } else {
+            linear_tone(&guarded, &img)
         }
     };
     let t00 = Instant::now();
