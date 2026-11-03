@@ -1186,150 +1186,223 @@ pub fn return_background(src: &Array3<f32>, net: &Array3<f32>, sigma: f32) -> Ar
     out
 }
 
-/// Раздельный гауссов blur с железным краем (clamp) и радиусом 3σ.
+/// НЧ-фильтр Баттерворта с резкой границей полосы (2.50).
 ///
-/// Для малых σ (страховка тона, σ=3) он дешевле и, главное, экономнее по
-/// памяти, чем FFT-путь: нет ни паддинг-копии кадра, ни буфера `Complex32`
-/// (на `Calendar1` 7650×12724 это 0.8–1.5 ГБ разницы).
-fn gaussian_blur_rect(a: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
-    let r = (3.0 * sigma).ceil().max(1.0) as usize;
-    let mut k = vec![0.0f32; 2 * r + 1];
-    let mut sum = 0.0f32;
-    for (i, v) in k.iter_mut().enumerate() {
-        let d = i as f32 - r as f32;
-        *v = (-0.5 * (d / sigma).powi(2)).exp();
-        sum += *v;
-    }
-    for v in k.iter_mut() {
-        *v /= sum;
-    }
-    let mut tmp = vec![0.0f32; h * w];
-    for y in 0..h {
-        for x in 0..w {
-            let mut s = 0.0f32;
-            for (i, kv) in k.iter().enumerate() {
-                let sx = (x as isize + i as isize - r as isize).clamp(0, w as isize - 1) as usize;
-                s += kv * a[y * w + sx];
-            }
-            tmp[y * w + x] = s;
+/// `t_cut` — период среза в пикселях, `order` — порядок (8 при срезе по
+/// суперячейке растра). В отличие от гаусса, который режет полого, здесь
+/// полоса до `~t_cut` проходит почти целиком, а выше — падает на десятки дБ:
+/// при `t_cut = 2.4/r`, `order = 8` усиление на несущей (1/r) меньше 1e-6,
+/// на суперячейке (2/r) ≈ 0.08, на самом срезе 0.5.
+///
+/// Края закрываются replicate-паддингом на `2·t_cut`: без него свёртка идёт
+/// по кругу и на кромке кадра подмешивается противоположная сторона (та же
+/// ошибка, что чинилась в 2.49 для гауссова пути).
+fn butter_lowpass_channel(
+    ch: &[f32],
+    h: usize,
+    w: usize,
+    t_cut: f32,
+    order: f32,
+) -> Vec<f32> {
+    let pad = (2.0 * t_cut).ceil().max(16.0) as usize;
+    let (hp, wp) = (h + 2 * pad, w + 2 * pad);
+    let mut plane = vec![0.0f32; hp * wp];
+    for y in 0..hp {
+        let sy = y.saturating_sub(pad).min(h - 1);
+        for x in 0..wp {
+            let sx = x.saturating_sub(pad).min(w - 1);
+            plane[y * wp + x] = ch[sy * w + sx];
         }
     }
-    let mut out = vec![0.0f32; h * w];
-    for x in 0..w {
-        for y in 0..h {
-            let mut s = 0.0f32;
-            for (i, kv) in k.iter().enumerate() {
-                let sy = (y as isize + i as isize - r as isize).clamp(0, h as isize - 1) as usize;
-                s += kv * tmp[sy * w + x];
+    let mut buf = fft2_forward_rect(&plane, hp, wp);
+    for y in 0..hp {
+        let fy = if y <= hp / 2 {
+            y as f32 / hp as f32
+        } else {
+            (y as f32 - hp as f32) / hp as f32
+        };
+        for x in 0..wp {
+            let fx = if x <= wp / 2 {
+                x as f32 / wp as f32
+            } else {
+                (x as f32 - wp as f32) / wp as f32
+            };
+            let f = (fy * fy + fx * fx).sqrt() * t_cut;
+            if f > 0.0 {
+                buf[y * wp + x] *= 1.0 / (1.0 + f.powf(2.0 * order));
             }
-            out[y * w + x] = s;
+        }
+    }
+    fft2_inverse_rect(&mut buf, hp, wp);
+    let mut out = vec![0.0f32; h * w];
+    for y in 0..h {
+        for x in 0..w {
+            out[y * w + x] = buf[(y + pad) * wp + x + pad].re;
         }
     }
     out
 }
 
-/// Прямоугольный box-blur (раздельный, O(h·w), clamp по краям).
-///
-/// Раньше здесь была интегральная карта в f64: на кадре `Calendar1`
-/// (7650×12724) это 790 МБ только под одну матрицу, а нужна она дважды.
-fn box_blur_rect(a: &[f32], h: usize, w: usize, win: usize) -> Vec<f32> {
-    let r = (win / 2).max(1);
-    let norm = (2 * r + 1) as f32;
-    let mut tmp = vec![0.0f32; h * w];
-    // горизонтальный проход
-    let mut pref = vec![0.0f32; w + 1];
-    for y in 0..h {
-        pref[0] = 0.0;
-        for x in 0..w {
-            pref[x + 1] = pref[x] + a[y * w + x];
-        }
-        for x in 0..w {
-            let lo = x.saturating_sub(r);
-            let hi = (x + r + 1).min(w);
-            let mut s = pref[hi] - pref[lo];
-            let left_missing = (r as isize - x as isize).max(0) as f32;
-            let right_missing = ((x + r + 1) as isize - w as isize).max(0) as f32;
-            s += left_missing * a[y * w] + right_missing * a[y * w + w - 1];
-            tmp[y * w + x] = s / norm;
-        }
-    }
-    // вертикальный проход
-    let mut out = vec![0.0f32; h * w];
-    let mut pref = vec![0.0f32; h + 1];
-    for x in 0..w {
-        pref[0] = 0.0;
-        for y in 0..h {
-            pref[y + 1] = pref[y] + tmp[y * w + x];
-        }
-        for y in 0..h {
-            let lo = y.saturating_sub(r);
-            let hi = (y + r + 1).min(h);
-            let mut s = pref[hi] - pref[lo];
-            let top_missing = (r as isize - y as isize).max(0) as f32;
-            let bot_missing = ((y + r + 1) as isize - h as isize).max(0) as f32;
-            s += top_missing * tmp[x] + bot_missing * tmp[(h - 1) * w + x];
-            out[y * w + x] = s / norm;
-        }
-    }
-    out
-}
-
-/// Локальная тоновая страховка для нативного режима (2.49).
+/// Локальная тоновая страховка для нативного режима (2.50).
 ///
 /// Что лечит (замер на 11 реальных сканах): в областях без структуры — белая
 /// бумага, плашки, блики — сеть уводит средний уровень на 2–6 уровней и
-/// рисует пятна с периодом 8–40 px (на 1821146u у левой кромки выход 0.146
-/// против 0.212 в скане; в белом блоке 512² энергия полосы 8–16 px 0.64
-/// уровня против 0.28 у скана, 16–32 px — 0.51 против 0.20). Это и есть
-/// «пятнистый белый».
+/// рисует пятна с периодом 16–64 px. На белой плашке `Calendar1` (320²)
+/// энергия полосы 16–32 px у выхода 2.48/2.49 в 2.1 раза выше, чем у скана
+/// (10.2 против 4.8), 32–64 px — в 1.9 раза (7.6 против 4.0). Глазами это и
+/// есть «регулярная пятнистость» на белых костюмах и плашках.
 ///
-/// Операция: `out = net + (1 - m) * (LP(src) - LP(net))`, где `LP` — гаусс с
-/// малым σ, а `m` — маска структурности скана (0 = гладкая бумага, 1 =
-/// растр/текст/край). Растр в это не попадает: при r≈0.149 и σ=3 усиление
-/// фильтра на несущей exp(-0.5·(2π·0.149·3)²) ≈ 0.02, то есть переносится
-/// только НЧ-составляющая скана (тон и освещённость), а ВЧ выхода сети
-/// (включая снятый растр) остаётся нетронутой. Маска нужна, чтобы не отменять
-/// осмысленные крупномасштабные правки сети в структурных зонах.
+/// Операция: `out = net + LP(src - net)`, `LP` — Баттерворт: НЧ-составляющая
+/// (тон, освещённость, реальная фактура бумаги) берётся из СКАНА, всё, что
+/// выше среза, — из выхода сети. ВЧ сети (включая снятый растр) не трогается.
+///
+/// Почему не как в 2.49 (гаусс σ=3 + маска структурности):
+/// * гаусс σ=3 пропускал 35 % полосы 13 px — суперячейки растра (2 периода
+///   точек), и возвращал в кадр саму решётку: на белом 1821146u оставался
+///   пик 13.3 px амплитудой 1.5 уровня;
+/// * маска считалась по ВЧ скана, а у скана ВЧ — это растр: на плашке
+///   `Calendar1` активность 0.026 при пороге 0.020, то есть маска = 1 ровно
+///   на самых белых и самых растровых местах, и страховка там не работала
+///   вовсе (guard 16–32 px = 11.3 против raw 11.6).
+///
+/// Срез `t_cut` задаётся над суперячейкой растра (2/r), поэтому решётка в
+/// кадр не возвращается: T=12 даёт видимую сетку на полосе `Pack`, T=16–18
+/// (r≈0.145) — уже нет.
 pub fn local_tone_guard(
     net: &Array3<f32>,
     src: &Array3<f32>,
-    sigma: f32,
-    s0: f32,
-    s1: f32,
+    t_cut: f32,
+    order: f32,
 ) -> Array3<f32> {
     let (c, h, w) = (net.shape()[0], net.shape()[1], net.shape()[2]);
-    // Структурность скана: |luma - box5(luma)|, сглаженная box9. На белой
-    // бумаге 0.001–0.004, на растре/тексте 0.02–0.06 (замер по 11 сканам).
-    // Всё, кроме итоговой маски, живёт в своём блоке: на кадре 97 МП каждый
-    // такой буфер — 390 МБ, держать пять штук до конца незачем.
-    let mask = {
-        let lm: Vec<f32> = {
-            let a = luma_of(src);
-            (0..h * w).map(|k| a[[k / w, k % w]]).collect()
-        };
-        let lp5 = box_blur_rect(&lm, h, w, 5);
-        let hi: Vec<f32> = (0..h * w).map(|k| (lm[k] - lp5[k]).abs()).collect();
-        let act = box_blur_rect(&hi, h, w, 9);
-        let raw_mask: Vec<f32> = act
-            .iter()
-            .map(|&a| ((a - s0) / (s1 - s0 + 1e-9)).clamp(0.0, 1.0))
-            .collect();
-        // Маску сглаживаем широко, иначе на границе зон появляются ступеньки.
-        box_blur_rect(&raw_mask, h, w, 33)
-    };
     let mut out = Array3::<f32>::zeros((c, h, w));
     for ch in 0..c {
-        let s: Vec<f32> = (0..h * w).map(|k| src[[ch, k / w, k % w]]).collect();
-        let n: Vec<f32> = (0..h * w).map(|k| net[[ch, k / w, k % w]]).collect();
-        let lp_s = gaussian_blur_rect(&s, h, w, sigma);
-        let lp_n = gaussian_blur_rect(&n, h, w, sigma);
+        let d: Vec<f32> = (0..h * w)
+            .map(|k| src[[ch, k / w, k % w]] - net[[ch, k / w, k % w]])
+            .collect();
+        let lp = butter_lowpass_channel(&d, h, w, t_cut, order);
         for k in 0..h * w {
-            let wgt = 1.0 - mask[k];
-            out[[ch, k / w, k % w]] =
-                (n[k] + wgt * (lp_s[k] - lp_n[k])).clamp(0.0, 1.0);
+            let n = net[[ch, k / w, k % w]];
+            out[[ch, k / w, k % w]] = (n + lp[k]).clamp(0.0, 1.0);
         }
     }
     out
+}
+
+/// Раздельный box-фильтр с железным краем (clamp): окно нечётное.
+///
+/// Нужен для оценки медленно меняющихся амплитуд решётки. Префиксные суммы по
+/// строке/столбцу, поэтому цена линейна по числу пикселей и не зависит от окна.
+fn box_blur_rect(a: &[f32], h: usize, w: usize, win: usize) -> Vec<f32> {
+    let r = (win.max(1) / 2) as isize;
+    let mut tmp = vec![0.0f32; h * w];
+    let mut pre = vec![0.0f64; w.max(h) + 1];
+    for y in 0..h {
+        let base = y * w;
+        pre[0] = 0.0;
+        for x in 0..w {
+            pre[x + 1] = pre[x] + a[base + x] as f64;
+        }
+        for x in 0..w {
+            let lo = (x as isize - r).clamp(0, w as isize - 1) as usize;
+            let hi = (x as isize + r).clamp(0, w as isize - 1) as usize;
+            tmp[base + x] = ((pre[hi + 1] - pre[lo]) / (hi - lo + 1) as f64) as f32;
+        }
+    }
+    let mut out = vec![0.0f32; h * w];
+    for x in 0..w {
+        pre[0] = 0.0;
+        for y in 0..h {
+            pre[y + 1] = pre[y] + tmp[y * w + x] as f64;
+        }
+        for y in 0..h {
+            let lo = (y as isize - r).clamp(0, h as isize - 1) as usize;
+            let hi = (y as isize + r).clamp(0, h as isize - 1) as usize;
+            out[y * w + x] = ((pre[hi + 1] - pre[lo]) / (hi - lo + 1) as f64) as f32;
+        }
+    }
+    out
+}
+
+/// Подавление регулярной решётки сети (2.51).
+///
+/// Что лечит (замер на идеально плоском входе 1024², `DESCREEN_NET_ONLY=1`):
+/// на постоянном поле выход сети не постоянен — на нём стоят пики 4.00 px по
+/// осям (амплитуда 1.1–2.6 уровня), 2.83 px по диагонали (0.3–0.9) и 2.00 px
+/// (1.0–2.6). Все они лежат на узлах решётки с периодом 4 px, то есть это
+/// checkerboard апсемплинга сети, а не растр: на реальных сканах те же пики
+/// видны поверх гладких белых костюмов/плашек и читаются как «регулярная
+/// крапчатость».
+///
+/// Операция — разложение на 16 фаз (y%4, x%4). Каждая фаза — своя подрешётка
+/// с шагом 4 px; её локальное среднее (box с окном `win` в полных пикселях —
+/// это ровно амплитуда соответствующей гармоники решётки) вычитается из
+/// кадра, а вместо неё возвращается общее локальное среднее с тем же
+/// эффективным окном:
+///
+/// ```text
+/// out = ch - mean_phase[i][j] + mean_full      (окна согласованы: 4·win/4)
+/// ```
+///
+/// Всё, что не периодично с периодом 4 px, из кадра не уходит: в фазовых
+/// средних оно сокращается. Согласование окон обязательно — при окне общего
+/// среднего вчетверо меньше полосы фазовых средних разность начинает содержать
+/// полосу 4·pw..pw, и scrub не убирает пятна, а удваивает их (проверено).
+///
+/// Замер после стадии (кропы 512², 2.50 → 2.51): пики 4/2.83/2 px падают с
+/// 0.78–2.31 до ≤0.01 уровня, sd и острота не меняются (Calendar1 3.48→3.48,
+/// 2.23→2.21; Pack 3.60→3.57), средний уровень сохраняется.
+pub fn grid_scrub(img: &Array3<f32>, win: usize) -> Array3<f32> {
+    let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
+    let win = win.max(4) | 1; // окно в полных пикселях, нечётное
+    let pw = (win / 4).max(3) | 1; // окно в фазовой подрешётке
+    let win_full = 4 * pw - 1; // то же эффективное окно (span 4·pw-1 ≈ 4·pw), нечётное
+    let mut res = Array3::<f32>::zeros((c, h, w));
+    for ch in 0..c {
+        // Канал в плоский буфер: индексация ndarray с делением k/w в горячем
+        // цикле стоила на 18 МП больше 10 с.
+        let mut src = vec![0.0f32; h * w];
+        for y in 0..h {
+            for x in 0..w {
+                src[y * w + x] = img[[ch, y, x]];
+            }
+        }
+        let lp_full = box_blur_rect(&src, h, w, win_full);
+        let mut dst = src.clone();
+        for i in 0..4.min(h) {
+            let hs = (h - i + 3) / 4;
+            for j in 0..4.min(w) {
+                let ws = (w - j + 3) / 4;
+                if hs == 0 || ws == 0 {
+                    continue;
+                }
+                let mut sub = vec![0.0f32; hs * ws];
+                for m in 0..hs {
+                    let base = (i + 4 * m) * w + j;
+                    for n in 0..ws {
+                        sub[m * ws + n] = src[base + 4 * n];
+                    }
+                }
+                let lp = box_blur_rect(&sub, hs, ws, pw);
+                for m in 0..hs {
+                    let base = (i + 4 * m) * w + j;
+                    for n in 0..ws {
+                        let k = base + 4 * n;
+                        // Общее локальное среднее берём в тех же координатах:
+                        // сдвиг меньше пикселя не критичен (окно ≥30 px), а
+                        // согласованность окон убирает утечку полосы 4·pw..pw.
+                        dst[k] = (src[k] - lp[m * ws + n] + lp_full[k]).clamp(0.0, 1.0);
+                    }
+                }
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                res[[ch, y, x]] = dst[y * w + x];
+            }
+        }
+    }
+    res
 }
 
 pub fn linear_tone(out: &Array3<f32>, src: &Array3<f32>) -> Array3<f32> {
@@ -2115,7 +2188,7 @@ mod tests {
             let base = if (x / 16 + y / 16) % 2 == 0 { 0.85 } else { 0.35 };
             (base + 0.02 * ch as f32 + 0.01 * ((x + y) % 3) as f32).clamp(0.0, 1.0)
         });
-        let out = local_tone_guard(&src, &src, 3.0, 0.004, 0.02);
+        let out = local_tone_guard(&src, &src, 16.0, 8.0);
         let mut worst = 0.0f32;
         for ch in 0..c {
             for y in 0..h {
@@ -2129,7 +2202,7 @@ mod tests {
 
     #[test]
     fn local_tone_guard_restores_flat_tone() {
-        // Плоская бумага: сеть уводит уровень и добавляет пятна 8–40 px —
+        // Плоская бумага: сеть уводит уровень и добавляет пятна 40–70 px —
         // страховка обязана вернуть средний уровень к скану, сохранив ВЧ.
         let (c, h, w) = (3usize, 96usize, 96usize);
         let src = Array3::from_shape_fn((c, h, w), |(ch, _y, _x)| 0.80 - 0.02 * ch as f32);
@@ -2137,7 +2210,7 @@ mod tests {
             let blob = 0.03 * ((x as f32 / 9.0).sin() * (y as f32 / 11.0).cos());
             (src[[ch, y, x]] - 0.06 + blob).clamp(0.0, 1.0)
         });
-        let out = local_tone_guard(&net, &src, 3.0, 0.004, 0.02);
+        let out = local_tone_guard(&net, &src, 16.0, 8.0);
         for ch in 0..c {
             let mut mean = 0.0f64;
             for y in 0..h {
@@ -2150,6 +2223,108 @@ mod tests {
             assert!(
                 (mean - want).abs() < 0.01,
                 "flat tone must return to the scan: {mean} vs {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_tone_guard_does_not_reinject_carrier() {
+        // 2.49: гаусс σ=3 пропускал 35 % суперячейки (13 px при r≈0.149) и
+        // 2 % несущей — на белом оставалась регулярная решётка. Срез 16 px
+        // обязан держать и несущую, и суперячейку ниже 0.1 уровня (0.4/255).
+        let (c, h, w) = (3usize, 128usize, 128usize);
+        let (r, r2) = (0.1487f32, 0.1487 / 2.0);
+        let src = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let a = 0.04 * (2.0 * std::f32::consts::PI * r * x as f32).sin();
+            let b = 0.04 * (2.0 * std::f32::consts::PI * r2 * (x + y) as f32).cos();
+            (0.80 + a + b + 0.01 * ch as f32).clamp(0.0, 1.0)
+        });
+        let net = Array3::<f32>::from_shape_fn((c, h, w), |(ch, _y, _x)| 0.80 + 0.01 * ch as f32);
+        let out = local_tone_guard(&net, &src, 16.0, 8.0);
+        // Края кадра не проверяем: replicate-паддинг обрывает синус ступенькой,
+        // и её низкочастотный хвост живёт в первых ~40 px (у скана граница
+        // непрерывна, там такого скачка нет).
+        let mut worst = 0.0f32;
+        for ch in 0..c {
+            for y in 40..h - 40 {
+                for x in 40..w - 40 {
+                    worst = worst.max((out[[ch, y, x]] - net[[ch, y, x]]).abs());
+                }
+            }
+        }
+        assert!(
+            worst < 0.4 / 255.0,
+            "carrier and supercell must not come back, worst {worst}"
+        );
+    }
+
+    #[test]
+    fn grid_scrub_kills_checkerboard() {
+        // 2.51: на постоянном поле сеть рисует checkerboard с периодом 4 px —
+        // пики 4.00 px по осям, 2.83 px по диагонали, 2.00 px. Разложение по
+        // 16 фазам обязано снять его, не тронув наклон (тон).
+        let (c, h, w) = (3usize, 128usize, 128usize);
+        let ramp = |ch: usize, x: usize, y: usize| {
+            0.45 + 0.02 * ch as f32 + 0.20 * x as f32 / w as f32 + 0.10 * y as f32 / h as f32
+        };
+        let pat = |x: usize, y: usize| {
+            let px = std::f32::consts::PI * x as f32 / 2.0;
+            let py = std::f32::consts::PI * y as f32 / 2.0;
+            0.004 * px.cos() * py.cos() + 0.003 * (px + py).cos()
+        };
+        let img = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            (ramp(ch, x, y) + pat(x, y)).clamp(0.0, 1.0)
+        });
+        let out = grid_scrub(&img, 32);
+        let (mut num, mut den, mut worst) = (0.0f64, 0.0f64, 0.0f32);
+        for ch in 0..c {
+            for y in 16..h - 16 {
+                for x in 16..w - 16 {
+                    let d = out[[ch, y, x]] - ramp(ch, x, y);
+                    num += (d as f64).powi(2);
+                    den += (pat(x, y) as f64).powi(2);
+                    worst = worst.max((out[[ch, y, x]] - ramp(ch, x, y)).abs());
+                }
+            }
+        }
+        let keep = (num / den).sqrt();
+        assert!(keep < 0.1, "checkerboard must be removed, kept {keep}");
+        assert!(
+            worst < 0.4 / 255.0,
+            "no residual grid above 0.4 level, worst {worst}"
+        );
+    }
+
+    #[test]
+    fn grid_scrub_keeps_mean_and_detail() {
+        // Гладкая фактура (не периодичная с шагом 4 px) должна выжить: scrub
+        // убирает только фазово-когерентную часть.
+        let (c, h, w) = (3usize, 192usize, 192usize);
+        let img = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let blob = 0.05 * ((x as f32 / 23.0).sin() * (y as f32 / 17.0).cos());
+            (0.60 + 0.01 * ch as f32 + blob).clamp(0.0, 1.0)
+        });
+        let out = grid_scrub(&img, 32);
+        for ch in 0..c {
+            let (mut m0, mut m1, mut v0, mut v1) = (0.0f64, 0.0f64, 0.0f64, 0.0f64);
+            // Поля 64 px от кромки не берём: у фазовых средних и у общего
+            // среднего разная длина clamp-повтора на границе кадра.
+            for y in 64..h - 64 {
+                for x in 64..w - 64 {
+                    m0 += img[[ch, y, x]] as f64;
+                    m1 += out[[ch, y, x]] as f64;
+                    v0 += (img[[ch, y, x]] as f64).powi(2);
+                    v1 += (out[[ch, y, x]] as f64).powi(2);
+                }
+            }
+            let n = ((h - 128) * (w - 128)) as f64;
+            // Остаточный сдвиг — сотые доли уровня (окна фазовых средних и
+            // общего среднего совпадают лишь приближённо, 4·pw-1 против 4·pw).
+            assert!((m0 - m1).abs() / n < 2e-4, "mean must stay: {m0} vs {m1}");
+            let (s0, s1) = ((v0 / n).sqrt(), (v1 / n).sqrt());
+            assert!(
+                (s1 - s0).abs() < 0.02 * s0,
+                "smooth texture must survive: {s0} vs {s1}"
             );
         }
     }

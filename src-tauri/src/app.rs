@@ -10,8 +10,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::candle_engine::CandleEngine;
 use crate::inference::{Ep, InferenceEngine, TileParams};
 use crate::prefilter::{
-    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, linear_tone, local_tone_guard,
-    luma_of, return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
+    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, grid_scrub, linear_tone,
+    local_tone_guard, luma_of, return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
 };
 use crate::runtime;
 
@@ -605,27 +605,43 @@ pub fn descreen_file(
     // the correction scale k: net_corr = pre + k * (net - pre). Parity with
     // `ml/preproc/backoff.apply_global` net_raw before `finish`. b_use — вес
     // нейросети (адаптивный спад ниже, см. blend-fallback).
-    // 2.49: локальная тоновая страховка. В областях без структуры (бумага,
-    // плашки, блики) сеть на сыром входе уводит средний уровень на 2–6 уровней
-    // и рисует пятна 8–40 px — «пятнистый белый». Возвращаем НЧ выхода к НЧ
-    // скана там, где скан гладкий; растр в этот фильтр не проходит (gain на
-    // несущей ≈0.02 при σ=3), ВЧ сети остаются нетронутыми. По умолчанию —
-    // только в нативном режиме, `DESCREEN_TONE_GUARD=1/0` переопределяет.
+    // 2.49→2.50: локальная тоновая страховка. В областях без структуры
+    // (бумага, плашки, блики) сеть на сыром входе уводит средний уровень на
+    // 2–6 уровней и рисует пятна 16–64 px — «пятнистый белый». Возвращаем НЧ
+    // выхода к НЧ скана фильтром с резкой границей (Баттерворт): срез стоит
+    // НАД суперячейкой растра (2/r ≈ 14 px при r≈0.145), поэтому сама решётка
+    // в кадр не возвращается, а полоса, где живёт пятнистость, приходит из
+    // скана. По умолчанию — только в нативном режиме,
+    // `DESCREEN_TONE_GUARD=1/0` переопределяет.
+    //
+    // 2.49 использовала гаусс σ=3: он пропускал 35 % полосы 13 px (суперячейка
+    // растра), а маска структурности считалась по ВЧ скана — то есть по самому
+    // растру, и на самых белых плашках выключала страховку полностью
+    // (`Calendar1`: 16–32 px 11.3 против raw 11.6). См. `local_tone_guard`.
     let tg_on = std::env::var("DESCREEN_TONE_GUARD")
         .map(|v| v != "0")
         .unwrap_or(native_mode);
-    let tg_sigma = std::env::var("DESCREEN_TG_SIGMA")
+    let tg_tcut = std::env::var("DESCREEN_TG_TCUT")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(3.0);
-    let tg_s0 = std::env::var("DESCREEN_TG_S0")
+        .unwrap_or_else(|| {
+            let r = if ring_r > 0.0 { ring_r } else { 0.14 };
+            (2.3 / r).clamp(15.0, 26.0)
+        });
+    let tg_order = std::env::var("DESCREEN_TG_ORDER")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.004);
-    let tg_s1 = std::env::var("DESCREEN_TG_S1")
+        .unwrap_or(12.0);
+    // 2.51: подавление решётки сети (checkerboard 4 px). `DESCREEN_GRID_SCRUB=0`
+    // выключает, `DESCREEN_GRID_WIN` задаёт окно оценки в пикселях (по умолчанию
+    // 32: на 64/128 остаётся больше следа — амплитуда решётки локально дрейфует).
+    let gs_on = std::env::var("DESCREEN_GRID_SCRUB")
+        .map(|v| v != "0")
+        .unwrap_or(native_mode);
+    let gs_win = std::env::var("DESCREEN_GRID_WIN")
         .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .unwrap_or(0.020);
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(32);
     let finish = |net: &ndarray::Array3<f32>, k: f32, b_use: f32|
      -> ndarray::Array3<f32> {
         // DESCREEN_NET_ONLY=1 — отдаём чистый выход сети (без blend-карты,
@@ -649,13 +665,31 @@ pub fn descreen_file(
         } else {
             return_background(&img, &blended, pcfg.bg_sigma)
         };
+        // 2.51: снятие checkerboard-решётки сети. На постоянном поле выход
+        // имеет пики 4/2.83/2 px (амплитуда 1–2.6 уровня) — на гладких белых
+        // костюмах и плашках это «регулярная крапчатость». Стадия стоит ДО
+        // unsharp (он бы её усилил) и до страховки тона (её срез 15–26 px
+        // такую частоту не трогает ни в какую сторону).
+        let swapped = if gs_on {
+            let t = std::time::Instant::now();
+            let r = grid_scrub(&swapped, gs_win);
+            if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+                eprintln!(
+                    "[stage] grid-scrub: win={gs_win}px {:.1}s",
+                    t.elapsed().as_secs_f32()
+                );
+            }
+            r
+        } else {
+            swapped
+        };
         let guarded = if tg_on {
             if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
                 eprintln!(
-                    "[stage] tone-guard: sigma={tg_sigma:.2} s0={tg_s0:.4} s1={tg_s1:.4}"
+                    "[stage] tone-guard: t_cut={tg_tcut:.1}px order={tg_order:.0}"
                 );
             }
-            local_tone_guard(&swapped, &img, tg_sigma, tg_s0, tg_s1)
+            local_tone_guard(&swapped, &img, tg_tcut, tg_order)
         } else {
             swapped
         };
