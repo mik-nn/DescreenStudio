@@ -1405,31 +1405,63 @@ pub fn grid_scrub(img: &Array3<f32>, win: usize) -> Array3<f32> {
     res
 }
 
+/// Тоновое выравнивание выхода к скану.
+///
+/// 2.52: масштаб контраста считается по **НЧ** обеих картинок, а не по всему
+/// кадру. Причина: после снятия растра СКО выхода законно ниже СКО скана —
+/// растр давал в него основной вклад (замер `1821146u`: 65.78 против 68.60, то
+/// есть a = 1.043). Подгонка «в лоб» возвращала этот разброс умножением всего
+/// кадра, и на плашках бумажная фактура с полосами 16–128 px становилась на
+/// 4–5 % контрастнее скана (замер октав: 1.05× с этим умножением против 1.00×
+/// без него) — то есть стадия сама подкрашивала ровно те пятна, которые убирает
+/// страховка тона. Тон и освещённость живут в НЧ, поэтому масштаб берётся по
+/// box-НЧ (окно 33–129 px), а среднее — по всему кадру (оно должно совпасть
+/// точно).
 pub fn linear_tone(out: &Array3<f32>, src: &Array3<f32>) -> Array3<f32> {
     let (c, h, w) = (out.shape()[0], out.shape()[1], out.shape()[2]);
+    let win = ((h.min(w) / 4).max(33)).min(129) | 1;
+    let n = (h * w) as f64;
     let mut res = Array3::<f32>::zeros((c, h, w));
     for ch in 0..c {
-        let (mut mo, mut vo, mut ms, mut vs, mut n) = (0.0f64, 0.0, 0.0f64, 0.0, 0usize);
+        let mut o = vec![0.0f32; h * w];
+        let mut s = vec![0.0f32; h * w];
+        let (mut mo, mut ms) = (0.0f64, 0.0f64);
         for y in 0..h {
             for x in 0..w {
-                mo += out[[ch, y, x]] as f64;
-                ms += src[[ch, y, x]] as f64;
-                n += 1;
+                let vo = out[[ch, y, x]];
+                let vs = src[[ch, y, x]];
+                o[y * w + x] = vo;
+                s[y * w + x] = vs;
+                mo += vo as f64;
+                ms += vs as f64;
             }
         }
-        mo /= n as f64;
-        ms /= n as f64;
-        for y in 0..h {
-            for x in 0..w {
-                vo += (out[[ch, y, x]] as f64 - mo).powi(2);
-                vs += (src[[ch, y, x]] as f64 - ms).powi(2);
+        mo /= n;
+        ms /= n;
+        let lo = box_blur_rect(&o, h, w, win);
+        let ls = box_blur_rect(&s, h, w, win);
+        let (mlo, mls) = {
+            let (mut a, mut b) = (0.0f64, 0.0f64);
+            for k in 0..h * w {
+                a += lo[k] as f64;
+                b += ls[k] as f64;
             }
+            (a / n, b / n)
+        };
+        let (mut vo, mut vs) = (0.0f64, 0.0f64);
+        for k in 0..h * w {
+            vo += (lo[k] as f64 - mlo).powi(2);
+            vs += (ls[k] as f64 - mls).powi(2);
         }
-        let a = ((vs / n as f64).sqrt() / ((vo / n as f64).sqrt() + 1e-12)) as f32;
-        for y in 0..h {
-            for x in 0..w {
-                res[[ch, y, x]] = ((out[[ch, y, x]] - mo as f32) * a + ms as f32).clamp(0.0, 1.0);
-            }
+        let (sdo, sds) = ((vo / n).sqrt(), (vs / n).sqrt());
+        // Страховка: если НЧ выхода пусто (плоская плашка), масштаб не трогаем.
+        let a = if sdo > 1e-6 {
+            (sds / sdo).clamp(0.9, 1.1) as f32
+        } else {
+            1.0
+        };
+        for k in 0..h * w {
+            res[[ch, k / w, k % w]] = ((o[k] - mo as f32) * a + ms as f32).clamp(0.0, 1.0);
         }
     }
     res
@@ -2155,6 +2187,48 @@ mod tests {
             assert!(((ms - mo) / (h * w) as f64).abs() < 1e-6);
         }
     }
+
+    #[test]
+    fn linear_tone_does_not_inflate_texture() {
+        // 2.52: растр в СКО скана — не тон. Раньше a = σ_scan/σ_out возвращал
+        // разброс растра умножением всего кадра: на `1821146u` это +4.3 % к
+        // бумажной фактуре и полосам 16–128 px. Теперь масштаб берётся по НЧ,
+        // поэтому тон выравнивается, а фактура не растёт.
+        let (c, h, w) = (3usize, 256usize, 256usize);
+        let lf = |ch: usize, x: usize, y: usize| {
+            (0.55 + 0.10 * x as f32 / w as f32 + 0.06 * y as f32 / h as f32 + 0.02 * ch as f32)
+                .clamp(0.0, 1.0)
+        };
+        let src = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let r = 0.03
+                * (std::f32::consts::PI * x as f32 / 3.0).sin()
+                * (std::f32::consts::PI * y as f32 / 3.0).cos();
+            (lf(ch, x, y) + r).clamp(0.0, 1.0)
+        });
+        let net = Array3::from_shape_fn((c, h, w), |(ch, y, x)| lf(ch, x, y));
+        let out = linear_tone(&net, &src);
+        let win = 33usize;
+        for ch in 0..c {
+            let n = (h * w) as f64;
+            let mut v = |a: &Array3<f32>| -> f64 {
+                let buf: Vec<f32> = (0..h * w).map(|k| a[[ch, k / w, k % w]]).collect();
+                let lo = box_blur_rect(&buf, h, w, win);
+                let m: f64 = lo.iter().map(|&x| x as f64).sum::<f64>() / n;
+                (lo.iter().map(|&x| (x as f64 - m).powi(2)).sum::<f64>() / n).sqrt()
+            };
+            let (s0, s1) = (v(&net), v(&out));
+            let keep = s1 / (s0 + 1e-12);
+            assert!(
+                (keep - 1.0).abs() < 0.02,
+                "tone must not inflate texture: {s0} -> {s1} ({keep})"
+            );
+            // Среднее по-прежнему приходит из скана.
+            let ms: f64 = (0..h * w).map(|k| src[[ch, k / w, k % w]] as f64).sum::<f64>() / n;
+            let mo: f64 = (0..h * w).map(|k| out[[ch, k / w, k % w]] as f64).sum::<f64>() / n;
+            assert!((ms - mo).abs() < 1e-5, "mean must come from the scan");
+        }
+    }
+
 
     #[test]
     fn gaussian_lowpass_does_not_wrap_edges() {

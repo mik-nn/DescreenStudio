@@ -17,6 +17,7 @@ cutoff ~0.005) where the LF-notch owns it.
 from __future__ import annotations
 
 import numpy as np
+from scipy.ndimage import uniform_filter
 
 from .config import P0Config
 
@@ -48,11 +49,25 @@ def return_background(
 
 
 def linear_tone(out: np.ndarray, ref: np.ndarray) -> np.ndarray:
-    """Diet tone fix: per-channel mean/std match (no CDF stretch)."""
+    """Diet tone fix: per-channel mean match + LF-contrast match (2.52).
+
+    Contrast scale is measured on the low-frequency part (box 33..129 px), not on
+    the whole frame. After descreening the std of the output is legitimately below
+    the scan's, because the raster produced most of it; matching full-frame std
+    scaled the whole frame up and inflated paper texture and 16-128 px blotches by
+    4-5% (measured on `1821146u`: bands 1.05x with the old rule, 1.00x without it).
+    Tone and illumination live in the LF, so that is what gets matched.
+    """
+    h, w = out.shape[0], out.shape[1]
+    win = max(33, min(129, min(h, w) // 4))
+    if win % 2 == 0:
+        win += 1
     res = np.empty_like(out)
     for c in range(3):
         o, r = out[:, :, c], ref[:, :, c]
-        a = r.std() / (o.std() + 1e-12)
+        lo = uniform_filter(o.astype(np.float32), win, mode="nearest")
+        lr = uniform_filter(r.astype(np.float32), win, mode="nearest")
+        a = float(np.clip(lr.std() / (lo.std() + 1e-12), 0.9, 1.1)) if lo.std() > 1e-6 else 1.0
         res[:, :, c] = (o - o.mean()) * a + r.mean()
     return np.clip(res, 0.0, 1.0)
 

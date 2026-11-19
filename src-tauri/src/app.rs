@@ -1058,6 +1058,16 @@ mod tests {
         // (Найквист-тесты и так работают с native_mode=false).
         let prev_native = std::env::var("DESCREEN_NATIVE").ok();
         std::env::set_var("DESCREEN_NATIVE", "0");
+        // 2.52: гейт blend-fallback (`sharp < 0.90` относительно pre) здесь
+        // выключается намеренно. «Контент» этого кадра — гладкий градиент без
+        // детали, поэтому sharp-отношение меряет только снятие растра: без
+        // надбавки `σ_scan/σ_out` (её убрала 2.52) оно садится ровно на 0.899
+        // при пороге 0.90, fallback тянет бленд назад к `pre` и возвращает
+        // растр. В нативном режиме (дефолт продукта) fallback и так выключен
+        // (`no_fallback = native_mode`), так что тест проверяет подавление
+        // полосы самой цепочкой.
+        let prev_fb = std::env::var("DESCREEN_NO_FALLBACK").ok();
+        std::env::set_var("DESCREEN_NO_FALLBACK", "1");
 
         runtime::prepare_runtime().unwrap();
         let model = runtime::resolve_model(None).unwrap();
@@ -1118,6 +1128,10 @@ mod tests {
         ms /= (h * w) as f64;
         mo /= (h * w) as f64;
         assert!((ms - mo).abs() < 0.03, "tone must hold: {ms} vs {mo}");
+        match prev_fb {
+            Some(v) => std::env::set_var("DESCREEN_NO_FALLBACK", v),
+            None => std::env::remove_var("DESCREEN_NO_FALLBACK"),
+        }
         match prev_native {
             Some(v) => std::env::set_var("DESCREEN_NATIVE", v),
             None => std::env::remove_var("DESCREEN_NATIVE"),
