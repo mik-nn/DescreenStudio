@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from ml.preproc.paperbg import linear_tone
+from ml.preproc.paperbg import linear_tone, local_tone_guard
 
 H = W = 256
 
@@ -74,3 +74,43 @@ def _box(plane: np.ndarray) -> np.ndarray:
     from scipy.ndimage import uniform_filter
 
     return uniform_filter(plane.astype(np.float32), 33, mode="nearest")
+
+
+def _chroma_plane(period: float = 24.0, amp: float = 0.02) -> np.ndarray:
+    """Zero-mean colour-only pattern: +u in one half-cycle, -u in the other."""
+    yy, xx = np.mgrid[0:H, 0:W]
+    t = amp * np.sin(2.0 * np.pi * xx / period) * np.cos(2.0 * np.pi * yy / period)
+    return t.astype(np.float32)
+
+
+def test_guard_returns_tone_but_not_lf_chroma() -> None:
+    """2.53: the colour rosette (8-32 px in u/v) must not come back."""
+    base = 0.76
+    t = _chroma_plane()
+    src = np.stack([base + 0.5 * t, base - 0.5 * t, np.full_like(t, base)], axis=-1)
+    net = np.full_like(src, base)
+    res = local_tone_guard(net, src, 16.0, 8.0)
+    u_in = 0.5 * (src[:, :, 0] - src[:, :, 1])
+    u_out = 0.5 * (res[:, :, 0] - res[:, :, 1])
+    inner = (slice(40, H - 40), slice(40, W - 40))
+    ratio = u_out[inner].std() / u_in[inner].std()
+    assert ratio < 0.15, ratio
+    # Tone still comes from the scan.
+    assert abs(res[..., 2].mean() - base) < 5e-3
+
+
+def test_guard_returns_lf_tone_of_scan() -> None:
+    """Luma LF of the scan comes back even though chroma does not (2.50)."""
+    src = _lf()
+    net = _lf() * 0.0 + 0.6  # net flattened the illumination
+    res = local_tone_guard(net, src, 32.0, 8.0)
+    inner = (slice(40, H - 40), slice(40, W - 40))
+    lo_res = _box_lf(res[:, :, 2])[inner]
+    lo_src = _box_lf(src[:, :, 2])[inner]
+    assert abs(lo_res.std() / lo_src.std() - 1.0) < 0.05
+
+
+def _box_lf(plane: np.ndarray) -> np.ndarray:
+    from scipy.ndimage import uniform_filter
+
+    return uniform_filter(plane.astype(np.float32), 65, mode="nearest")

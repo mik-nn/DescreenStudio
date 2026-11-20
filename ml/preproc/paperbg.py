@@ -72,5 +72,57 @@ def linear_tone(out: np.ndarray, ref: np.ndarray) -> np.ndarray:
     return np.clip(res, 0.0, 1.0)
 
 
+def butter_lowpass_channel(plane: np.ndarray, t_cut: float, order: float) -> np.ndarray:
+    """Mirror of `prefilter::butter_lowpass_channel` (replicate pad 2*t_cut)."""
+    h, w = plane.shape
+    pad = int(max(16.0, np.ceil(2.0 * t_cut)))
+    big = np.pad(plane.astype(np.float32), ((pad, pad), (pad, pad)), mode="edge")
+    hp, wp = big.shape
+    fy = np.fft.fftfreq(hp)[:, None]
+    fx = np.fft.fftfreq(wp)[None, :]
+    f = np.hypot(fy, fx) * t_cut
+    gain = 1.0 / (1.0 + np.power(np.maximum(f, 1e-12), 2.0 * order))
+    out = np.real(np.fft.ifft2(np.fft.fft2(big) * gain))
+    return out[pad:pad + h, pad:pad + w].astype(np.float32)
+
+
+def local_tone_guard(
+    net: np.ndarray,
+    src: np.ndarray,
+    t_cut: float,
+    order: float,
+    t_chroma: float | None = None,
+) -> np.ndarray:
+    """Mirror of `prefilter::local_tone_guard` (2.50-2.53).
+
+    out = net + LP_luma(src - net) + box2_chroma((src - net) - luma_part)
+
+    Tone and illumination are shared by the channels, so only the luma part of
+    the scan's LF comes back (cut above the halftone supercell, `t_cut`). The
+    chromatic part of `src - net` comes back only at the very lowest frequency
+    (`t_chroma`, default 4*t_cut): the four-colour rosette lives at 8-32 px in
+    u/v and must stay out, otherwise the guard refills the colour lattice the
+    net has already removed (2.53).
+    """
+    h, w = net.shape[0], net.shape[1]
+    t_chroma = 4.0 * t_cut if t_chroma is None else t_chroma
+    t_chroma = float(np.clip(t_chroma, 32.0, 160.0))
+    c = net.shape[2]
+    d = (src.astype(np.float32) - net.astype(np.float32))
+    if c >= 3:
+        luma = 0.299 * d[:, :, 0] + 0.587 * d[:, :, 1] + 0.114 * d[:, :, 2]
+    else:
+        luma = d[:, :, 0]
+    lp_luma = butter_lowpass_channel(luma, t_cut, order)
+    win = int(max(3, int(t_chroma)) | 1)
+    res = np.empty_like(d)
+    for ch in range(c):
+        q = d[:, :, ch] - luma
+        q = uniform_filter(q, win, mode="nearest")
+        q = uniform_filter(q, win, mode="nearest")
+        res[:, :, ch] = net[:, :, ch] + lp_luma + q
+    return np.clip(res, 0.0, 1.0).astype(np.float32)
+
+
 def default_sigma(_cfg: P0Config) -> float:
     return 32.0

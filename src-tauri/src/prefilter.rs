@@ -1268,22 +1268,64 @@ fn butter_lowpass_channel(
 /// Срез `t_cut` задаётся над суперячейкой растра (2/r), поэтому решётка в
 /// кадр не возвращается: T=12 даёт видимую сетку на полосе `Pack`, T=16–18
 /// (r≈0.145) — уже нет.
+///
+/// 2.53: цвет отдельно от тона. Растр четырёхкрасочный, и его след живёт не
+/// только в яркости: между растровыми точками разных красок остаётся
+/// цветная «розетка» с периодом 8–32 px. Поканальная страховка возвращала её
+/// из скана целиком, потому что НЧ цветности проходили ниже `t_cut`
+/// одинаково с тоном. Замер на `Pack` (полоса 8–32 px, окно 1472,2400,
+/// амплитуда как 2·СКО в уровнях): у скана решётка в u/v читается отчётливо,
+/// у 2.52 в `v` остаётся та же регулярная сетка, у 2.53 — ровный шум без
+/// периода. Тон/освещённость — величина общая для каналов, поэтому из скана
+/// берётся только яркостная НЧ-поправка со срезом `t_cut`; цветность
+/// возвращается лишь на самой низкой частоте (смещение баланса, окно
+/// `t_chroma`, по умолчанию 4·t_cut), а всё, что мельче, — из сети.
 pub fn local_tone_guard(
     net: &Array3<f32>,
     src: &Array3<f32>,
     t_cut: f32,
     order: f32,
 ) -> Array3<f32> {
+    let t_chroma = std::env::var("DESCREEN_TG_TCH")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(4.0 * t_cut)
+        .clamp(32.0, 160.0);
     let (c, h, w) = (net.shape()[0], net.shape()[1], net.shape()[2]);
+    let mut d: Vec<Vec<f32>> = Vec::with_capacity(c);
+    for ch in 0..c {
+        d.push(
+            (0..h * w)
+                .map(|k| src[[ch, k / w, k % w]] - net[[ch, k / w, k % w]])
+                .collect(),
+        );
+    }
+    // Общая (яркостная) часть поправки и поканальный остаток — цветность.
+    let mut m = vec![0.0f32; h * w];
+    for k in 0..h * w {
+        m[k] = if c >= 3 {
+            0.299 * d[0][k] + 0.587 * d[1][k] + 0.114 * d[2][k]
+        } else {
+            d[0][k]
+        };
+    }
+    let lp_m = butter_lowpass_channel(&m, h, w, t_cut, order);
+    // Цветность: срез на порядок ниже по частоте, box-фильтра достаточно
+    // (префиксные суммы, цена линейна) — Баттерворт стоил бы ещё 3 полных FFT.
+    // Два прохода box ≈ треугольное ядро: у полосы 8–32 px (цветная «розетка»)
+    // остаётся <1 % против 10–20 % у одного прохода, при той же цене.
+    let cwin = (t_chroma as usize).max(3) | 1;
+    let mut lp_c: Vec<Vec<f32>> = Vec::with_capacity(c);
+    for ch in 0..c {
+        let q: Vec<f32> = (0..h * w).map(|k| d[ch][k] - m[k]).collect();
+        let b1 = box_blur_rect(&q, h, w, cwin);
+        lp_c.push(box_blur_rect(&b1, h, w, cwin));
+    }
     let mut out = Array3::<f32>::zeros((c, h, w));
     for ch in 0..c {
-        let d: Vec<f32> = (0..h * w)
-            .map(|k| src[[ch, k / w, k % w]] - net[[ch, k / w, k % w]])
-            .collect();
-        let lp = butter_lowpass_channel(&d, h, w, t_cut, order);
         for k in 0..h * w {
             let n = net[[ch, k / w, k % w]];
-            out[[ch, k / w, k % w]] = (n + lp[k]).clamp(0.0, 1.0);
+            out[[ch, k / w, k % w]] = (n + lp_m[k] + lp_c[ch][k]).clamp(0.0, 1.0);
         }
     }
     out
@@ -2330,6 +2372,63 @@ mod tests {
             worst < 0.4 / 255.0,
             "carrier and supercell must not come back, worst {worst}"
         );
+    }
+
+    #[test]
+    fn local_tone_guard_drops_lf_chroma_of_the_print() {
+        // 2.53: цветная «розетка» печати с периодом 8–32 px не должна
+        // возвращаться из скана. Скан: ровный тон + чистая цветность (u-поле,
+        // период 24 px, амплитуда 0.04 = 10 уровней). Сеть уже сняла и растр,
+        // и его цветной след — её выход ровный. Страховка обязана вернуть тон,
+        // но не цветность ниже окна `t_chroma` = 4·t_cut = 64 px.
+        let (c, h, w) = (3usize, 160usize, 160usize);
+        let chroma = |x: usize, y: usize| {
+            0.04 * (2.0 * std::f32::consts::PI * x as f32 / 24.0).sin()
+                * (2.0 * std::f32::consts::PI * y as f32 / 24.0).cos()
+        };
+        // Тон одинаков во всех каналах: поправка яркости должна уйти в ноль.
+        let src = Array3::from_shape_fn((c, h, w), |(ch, y, x)| {
+            let t = chroma(x, y);
+            let base = 0.76;
+            let v = match ch {
+                0 => base + 0.5 * t,
+                1 => base - 0.5 * t,
+                _ => base,
+            };
+            v.clamp(0.0, 1.0)
+        });
+        // Сеть сняла растр: ровное поле, средний уровень тот же (иначе
+        // постоянная разность каналов даёт цветовой сдвиг, и тест измерял бы
+        // его, а не утечку полосы 24 px).
+        let net = Array3::<f32>::from_shape_fn((c, h, w), |(_ch, _y, _x)| 0.76);
+        let out = local_tone_guard(&net, &src, 16.0, 8.0);
+        let (mut e_in, mut e_out) = (0.0f64, 0.0f64);
+        let mut n = 0.0f64;
+        for y in 40..h - 40 {
+            for x in 40..w - 40 {
+                let cin = 0.5 * (src[[0, y, x]] - src[[1, y, x]]);
+                let cout = 0.5 * (out[[0, y, x]] - out[[1, y, x]]) - 0.5 * (net[[0, y, x]] - net[[1, y, x]]);
+                e_in += (cin as f64).powi(2);
+                e_out += (cout as f64).powi(2);
+                n += 1.0;
+            }
+        }
+        let (rin, rout) = ((e_in / n).sqrt(), (e_out / n).sqrt());
+        assert!(
+            rout < 0.15 * rin,
+            "LF chroma must stay out: in {rin:.4} out {rout:.4}"
+        );
+        // И при этом тон всё равно вернулся к скану.
+        let mut m = 0.0f64;
+        for ch in 0..c {
+            for y in 40..h - 40 {
+                for x in 40..w - 40 {
+                    m += out[[ch, y, x]] as f64;
+                }
+            }
+        }
+        m /= (c * (h - 80) * (w - 80)) as f64;
+        assert!((m - 0.76).abs() < 0.005, "tone must return to the scan, got {m}");
     }
 
     #[test]
