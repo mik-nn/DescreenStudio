@@ -1509,6 +1509,147 @@ pub fn linear_tone(out: &Array3<f32>, src: &Array3<f32>) -> Array3<f32> {
     res
 }
 
+/// Параметры подавления остаточной суперъячейки в плоских зонах (2.54).
+///
+/// σ1/σ2 — границы полосы difference-of-Gaussians: полоса пропускания
+/// `d = gauss(σ1) - gauss(σ2)` лежит примерно в 6…26 px при σ1=1.5, σ2=5.5
+/// (это ровно 8–32 px суперъячейки и её гармоник: 2·6.85, 3·6.85, 4·6.85).
+/// `TAU` — чувствительность маски к градиенту: при 0.010 (уровни/px) плашка
+/// (градиент 0.004) получает m≈0.7, текст/край (0.03+) — m≈0.
+/// `WIN` — окно усреднения градиента (9 px: маска не «прилипает» к одиночным
+/// пикселям и не рвётся на тонких штрихах).
+pub const FLAT_SIGMA_IN: f32 = 1.5;
+pub const FLAT_SIGMA_OUT: f32 = 5.5;
+pub const FLAT_MASK_TAU: f32 = 0.010;
+pub const FLAT_MASK_WIN: usize = 9;
+
+/// Подавление остаточной суперъячейки растра в плоских зонах (2.54).
+///
+/// Что лечит. 2.53 снимает несущую и цветную «розетку», но на голубой плашке
+/// `Pack` остаётся яркостная суперъячейка 8–32 px (размах 3–5 уровней, кратные
+/// несущей 6.85 px: 13.3/20/28/32). Глобальный спектр выхода её не показывает —
+/// фаза дрейфует, поэтому пик 13.3 px в кадре отсутствует, — а локальный
+/// (окно 128²) даёт в полосе 8–16 px 2.6 уровня против 4.6 у скана. Значит,
+/// спектральный нотч бесполезен: нужно снимать полосу в пространстве, там где
+/// она видна глазом, то есть на плоских участках.
+///
+/// Как. Берётся яркостная полоса `d = gauss(σ1) - gauss(σ2)` (6…26 px) и
+/// вычитается из всех каналов одинаково (цветность не трогаем — она уже
+/// вычищена в 2.53), но только там, где кадр плоский:
+///
+/// ```text
+/// m = 1 / (1 + (g/τ)²),  g = rms9(|∇gauss(0.8, Y)|)
+/// out = rgb - d·m
+/// ```
+///
+/// Маска — по градиенту **размытой** яркости: суперъячейка после σ=0.8
+/// размытия градиента почти не даёт, а текст, штрих, край объекта дают
+/// 0.03–0.08 уровня/px и полностью защищены. Усреднение по окну — RMS, а не
+/// среднее: на резкой кромке градиент — спайк в 1 px, среднее размывает его в
+/// 9 раз (m≈0.17, край терял 3 % контраста), RMS — втрое. Маска по локальному
+/// СКО (окно 32 px) была проверена и отвергнута: тонкие штрихи её разбавляют,
+/// текст терял 22 % остроты; здесь текст теряет 8.6 % (p99 градиента), плашка —
+/// 43 % полосы 8–16 px.
+///
+/// Замер `Pack` (полоса как 2·СКО в окне 128² на плашке, уровни):
+/// 4–8 0.71→0.61, 8–16 2.62→1.49, 16–32 2.26→1.49, 32–64 1.54→1.29;
+/// глобальная острота 0.0512→0.0495 (−3.3 %), p99 0.0844→0.0820.
+pub fn flat_lattice_scrub(img: &Array3<f32>, tau: f32) -> Array3<f32> {
+    let (c, h, w) = (img.shape()[0], img.shape()[1], img.shape()[2]);
+    let mut y = vec![0.0f32; h * w];
+    for k in 0..h * w {
+        let (yy, xx) = (k / w, k % w);
+        y[k] = if c >= 3 {
+            0.299 * img[[0, yy, xx]] + 0.587 * img[[1, yy, xx]] + 0.114 * img[[2, yy, xx]]
+        } else {
+            img[[0, yy, xx]]
+        };
+    }
+    let lp_in = gauss_fir_rect(&y, h, w, FLAT_SIGMA_IN);
+    let lp_out = gauss_fir_rect(&y, h, w, FLAT_SIGMA_OUT);
+    let mut d = vec![0.0f32; h * w];
+    for k in 0..h * w {
+        d[k] = lp_in[k] - lp_out[k];
+    }
+    // Маска плоских зон: |∇Y| после лёгкого размытия, RMS по окну. RMS, а не
+    // среднее: одиночный пик градиента на резкой кромке (спайк в 1 px) при
+    // усреднении размывается в 9 раз и кромка получает m≈0.17 (край терял 3 %
+    // контраста). RMS сохраняет вклад спайка (÷3), край защищён, а плашка
+    // (градиент равномерный) видит ровно ту же маску.
+    let yb = gauss_fir_rect(&y, h, w, 0.8);
+    let mut g = vec![0.0f32; h * w];
+    for yy in 0..h {
+        let (y0, y1) = (yy.saturating_sub(1), (yy + 1).min(h - 1));
+        for xx in 0..w {
+            let (x0, x1) = (xx.saturating_sub(1), (xx + 1).min(w - 1));
+            let gy = 0.5 * (yb[y1 * w + xx] - yb[y0 * w + xx]);
+            let gx = 0.5 * (yb[yy * w + x1] - yb[yy * w + x0]);
+            g[yy * w + xx] = gy * gy + gx * gx;
+        }
+    }
+    let g = box_blur_rect(&g, h, w, FLAT_MASK_WIN);
+    let tau = tau.max(1e-4);
+    let mut m = vec![0.0f32; h * w];
+    for k in 0..h * w {
+        let q = g[k].max(0.0).sqrt() / tau;
+        m[k] = 1.0 / (1.0 + q * q);
+    }    let mut res = Array3::<f32>::zeros((c, h, w));
+    for ch in 0..c {
+        for k in 0..h * w {
+            let (yy, xx) = (k / w, k % w);
+            res[[ch, yy, xx]] = (img[[ch, yy, xx]] - d[k] * m[k]).clamp(0.0, 1.0);
+        }
+    }
+    res
+}
+
+/// Раздельная гауссова свёртка с железным краем (clamp), радиус 3σ.
+///
+/// Для σ ≤ 6 (радиус ≤ 19) FIR дешевле полного FFT и совпадает с
+/// `scipy.ndimage.gaussian_filter` с точностью до краевой политики
+/// (reflect против clamp — на кадре 18 МП разница только в 2σ от кромки).
+fn gauss_fir_rect(a: &[f32], h: usize, w: usize, sigma: f32) -> Vec<f32> {
+    let r = (3.0 * sigma).ceil() as isize;
+    if r < 1 {
+        return a.to_vec();
+    }
+    let kn = (2 * r + 1) as usize;
+    let mut k = vec![0.0f32; kn];
+    let mut sum = 0.0f64;
+    for i in -r..=r {
+        let v = (-0.5 * (i as f32 / sigma).powi(2)).exp();
+        k[(i + r) as usize] = v;
+        sum += v as f64;
+    }
+    for v in k.iter_mut() {
+        *v = (*v as f64 / sum) as f32;
+    }
+    let mut tmp = vec![0.0f32; h * w];
+    for yy in 0..h {
+        let base = yy * w;
+        for xx in 0..w {
+            let mut acc = 0.0f32;
+            for (j, kv) in k.iter().enumerate() {
+                let sx = (xx as isize + j as isize - r).clamp(0, w as isize - 1) as usize;
+                acc += kv * a[base + sx];
+            }
+            tmp[base + xx] = acc;
+        }
+    }
+    let mut out = vec![0.0f32; h * w];
+    for yy in 0..h {
+        for xx in 0..w {
+            let mut acc = 0.0f32;
+            for (j, kv) in k.iter().enumerate() {
+                let sy = (yy as isize + j as isize - r).clamp(0, h as isize - 1) as usize;
+                acc += kv * tmp[sy * w + xx];
+            }
+            out[yy * w + xx] = acc;
+        }
+    }
+    out
+}
+
 /// Residual screen energy: top symmetric peak (xmean) above the raster band.
 /// No-GT metric for real scans; higher = more halftone left.
 pub fn residual_peak_xmean(gray: &Array2<f32>) -> f32 {
@@ -2581,5 +2722,54 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(maxd < 1e-4, "DCT impl diverges from naive: {maxd}");
+    }
+
+    #[test]
+    fn flat_lattice_scrub_kills_plate_lattice_keeps_edge() {
+        // 2.54: плоская плашка с суперъячейкой 13 px + отдельно вертикальный
+        // край. Плашка обязана потерять больше половины решётки, край — остаться.
+        let (h, w) = (192usize, 192usize);
+        let lat = |y: usize, x: usize| {
+            0.02 * (2.0 * PI * x as f32 / 13.0).cos() * (2.0 * PI * y as f32 / 20.0).cos()
+        };
+        let plate = Array3::from_shape_fn((3, h, w), |(_, y, x)| 0.55 + lat(y, x));
+        let out = flat_lattice_scrub(&plate, FLAT_MASK_TAU);
+        let amp = |a: &Array3<f32>| {
+            let mut s = 0.0f64;
+            let mut n = 0usize;
+            for y in 8..h - 8 {
+                for x in 16..64 {
+                    s += (a[[0, y, x]] as f64 - 0.55).powi(2);
+                    n += 1;
+                }
+            }
+            (s / n as f64).sqrt()
+        };
+        let (a0, a1) = (amp(&plate), amp(&out));
+        eprintln!("flat lattice: in {a0:.4} out {a1:.4}");
+        assert!(a1 < 0.6 * a0, "plate lattice must drop: {a0} -> {a1}");
+
+        // край: резкий перепад 0.2 без решётки, замер по средней строке
+        let step_img = Array3::from_shape_fn((3, h, w), |(_, _, x)| {
+            if x < w / 2 {
+                0.55
+            } else {
+                0.35
+            }
+        });
+        let step_out = flat_lattice_scrub(&step_img, FLAT_MASK_TAU);
+        let step = |a: &Array3<f32>| {
+            let mut s = 0.0f64;
+            for y in 8..h - 8 {
+                s += (a[[0, y, w / 2]] - a[[0, y, w / 2 - 1]]) as f64;
+            }
+            s / (h - 16) as f64
+        };
+        let (s0, s1) = (step(&step_img), step(&step_out));
+        eprintln!("flat edge step: in {s0:.4} out {s1:.4}");
+        assert!(
+            (s1 - s0).abs() < 0.02 * s0.abs(),
+            "edge must survive: {s0} -> {s1}"
+        );
     }
 }

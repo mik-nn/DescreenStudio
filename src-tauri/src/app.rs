@@ -10,8 +10,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::candle_engine::CandleEngine;
 use crate::inference::{Ep, InferenceEngine, TileParams};
 use crate::prefilter::{
-    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, grid_scrub, linear_tone,
-    local_tone_guard, luma_of, return_background, subtract_lf, top4_peak_sum, PrefilterCfg,
+    adaptive_notch, blend_map, build_notch_lists, detect_lf_bands, flat_lattice_scrub, grid_scrub,
+    linear_tone, local_tone_guard, luma_of, return_background, subtract_lf, top4_peak_sum,
+    PrefilterCfg, FLAT_MASK_TAU, FLAT_MASK_WIN, FLAT_SIGMA_IN, FLAT_SIGMA_OUT,
 };
 use crate::runtime;
 
@@ -642,6 +643,18 @@ pub fn descreen_file(
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(32);
+    // 2.54: подавление остаточной суперъячейки в плоских зонах. По умолчанию —
+    // в нативном режиме; `DESCREEN_FLAT_SCRUB=0` выключает для A/B.
+    let flat_on = std::env::var("DESCREEN_FLAT_SCRUB")
+        .map(|v| v != "0")
+        .unwrap_or(native_mode);
+    // Порог маски плоских зон: меньше — сильнее чистит плашки и сильнее
+    // трогает бумажную фактуру, больше — мягче.
+    let flat_tau = std::env::var("DESCREEN_FLAT_TAU")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .unwrap_or(FLAT_MASK_TAU)
+        .clamp(0.002, 0.05);
     let finish = |net: &ndarray::Array3<f32>, k: f32, b_use: f32|
      -> ndarray::Array3<f32> {
         // DESCREEN_NET_ONLY=1 — отдаём чистый выход сети (без blend-карты,
@@ -693,10 +706,34 @@ pub fn descreen_file(
         } else {
             swapped
         };
-        if std::env::var("DESCREEN_NO_TONE").map(|v| v != "0").unwrap_or(false) {
+        let toned = if std::env::var("DESCREEN_NO_TONE").map(|v| v != "0").unwrap_or(false) {
             guarded
         } else {
             linear_tone(&guarded, &img)
+        };
+        // 2.54: остаточная суперъячейка растра в плоских зонах. Тоновая
+        // страховка возвращает из скана НЧ ниже 15–26 px, и вместе с ними на
+        // плашки приходит яркостная решётка 8–32 px (кратные несущей 6.85 px).
+        // Глобальный спектр её не видит (фаза дрейфует), поэтому снимаем полосу
+        // 6–26 px в пространстве и только там, где кадр плоский (маска по
+        // градиенту размытой яркости). Стоит до unsharp: иначе он усилит
+        // остаток. `DESCREEN_FLAT_SCRUB=0` выключает для A/B.
+        if flat_on {
+            let t = std::time::Instant::now();
+            let r = flat_lattice_scrub(&toned, flat_tau);
+            if std::env::var_os("DESCREEN_STAGE_DBG").is_some() {
+                eprintln!(
+                    "[stage] flat-scrub: sigma={:.1}/{:.1}px tau={:.3} win={}px {:.1}s",
+                    FLAT_SIGMA_IN,
+                    FLAT_SIGMA_OUT,
+                    flat_tau,
+                    FLAT_MASK_WIN,
+                    t.elapsed().as_secs_f32()
+                );
+            }
+            r
+        } else {
+            toned
         }
     };
     let t00 = Instant::now();
