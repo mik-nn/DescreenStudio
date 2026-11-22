@@ -25,7 +25,9 @@
 
 Каталоги `Data/synth*`, `chain_*`, `Temp/*`, `ml/Archiv`, `ml/train/_run*` воспроизводятся генераторами с явными seed'ами; `dataset.json` перед удалением копируется в `Data/_manifests/<name>.json` (иначе рецепт терялся бы вместе с пикселями — `Data/` в `.gitignore`).
 
-**Результат.** Удалено 106.34 ГБ (`Data` 65.2, `Temp` 38.4, `ml` 13.9, pycache) — в `Data` осталось 12.3 ГБ из 70.3, в `Temp` 0.6 из 38.9. Отдельно `-What cargo` снял 12.98 ГБ мёртвых профилей (`target/release` и `target/debug` от 19.09, до появления `[build] target` в `.cargo/config.toml`; `target/x86_64-pc-windows-msvc/debug` 7.62 и `doc`). Рабочий профиль `target/x86_64-pc-windows-msvc/release` (2.94 ГБ, `descreen-studio.exe` от 20.11) сохранён — пересборка не нужна. Свободно на `F:` **7.5 → 180.5 ГБ**, папка проекта ≈ 20 ГБ.
+**Результат.** Удалено 106.34 ГБ (`Data` 65.2, `Temp` 38.4, `ml` 13.9, pycache) — в `Data` осталось 13.1 ГБ из 70.3, в `Temp` 4.2 из 38.9 (из них 3.5 — 11 исходных TIFF приёмки). Отдельно `-What cargo` снял 12.98 ГБ: `target/x86_64-pc-windows-msvc/{debug,doc}` (7.65 ГБ, debug-сборка приложения и rustdoc) и host-артефакты debug-профиля (3.66 ГБ). Рабочая сборка `target/x86_64-pc-windows-msvc/release` сохранена; контрольный `cargo build --release` после чистки собрался за **85 с** и завершился без ошибок (lib перекомпилировался, потому что в `target/` лежало состояние от сборки бенчмарков), `descreen-studio.exe` 26.9 МБ. Свободно на `F:` **7.5 → 180.5 ГБ**, папка проекта **141 → 22.8 ГБ**.
+
+**Что уточнилось по ходу.** `target/release` верхнего уровня — это не мусор, а host-артефакты Cargo (build-скрипты и proc-macros) для сборки под явный `[build] target`; после первой чистки он пересоздался (0.97 ГБ), и скрипт больше его не трогает — удаляются только debug-профиль приложения и rustdoc. `cargo build --release --no-default-features` не собирается (код ONNX-fallback не закрыт feature-гейтом), поэтому сборка продукта — только `cargo build --release` с дефолтным `ort-backend`.
 
 **Артефакты:** `scripts/clean.ps1` (ASCII, `Remove-Safe` с `\\?\` и проверкой, что путь внутри репозитория), `Data/_manifests/`.
 

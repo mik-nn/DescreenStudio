@@ -137,13 +137,16 @@ if ($What -contains 'ml') {
 }
 
 if ($What -contains 'cargo') {
-    # .cargo/config.toml sets [build] target = x86_64-pc-windows-msvc, so the
-    # live build is target/x86_64-pc-windows-msvc/release. Everything else in
-    # target/ is either pre-config (top-level release/debug, Sept) or a debug
-    # profile nobody builds with --release; removing them keeps the shipped
-    # binary and its incremental state intact (no rebuild needed).
+    # .cargo/config.toml sets [build] target = x86_64-pc-windows-msvc, so:
+    #   target/<triple>/release   - the shipped binary (keep)
+    #   target/<triple>/debug     - debug build of the app (drop)
+    #   target/<triple>/doc       - rustdoc (drop)
+    #   target/release            - HOST artefacts: build scripts + proc-macros
+    #                               for the release build (keep, else ~1 min
+    #                               host rebuild)
+    #   target/debug              - host artefacts of debug builds (drop)
     $target = Join-Path $Root 'src-tauri\target'
-    foreach ($rel in @('release', 'debug', 'x86_64-pc-windows-msvc\debug', 'x86_64-pc-windows-msvc\doc')) {
+    foreach ($rel in @('debug', 'x86_64-pc-windows-msvc\debug', 'x86_64-pc-windows-msvc\doc')) {
         $p = Join-Path $target $rel
         if (Test-Path -LiteralPath $p) {
             [void]$targets.Add([pscustomobject]@{ Tag = 'cargo'; Path = $p })
